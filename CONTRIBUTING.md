@@ -16,7 +16,7 @@ description — that gets you an answer faster than describing it in prose.
 git clone https://github.com/nodes-app/swift-markdown-engine.git
 cd swift-markdown-engine
 swift build
-swift test
+swift test --no-parallel
 ```
 
 Open `Package.swift` in Xcode for a graphical environment. The runnable
@@ -48,7 +48,8 @@ Screen recordings welcome.
   `Tests/MarkdownEngineTests/`
 - DocC comments for any public-API change; update `Demo/` if relevant
 - One-line entry in `CHANGELOG.md` under `[Unreleased]`
-- `swift build` and `swift test` must be green; CI runs the same checks
+- `swift build` and `swift test --no-parallel` must be green; CI runs the same checks.
+  Run in parallel, the suite has crashed inside AppKit on an unchanged `main` too (#175)
 
 ## Design constraints
 
