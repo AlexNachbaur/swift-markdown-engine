@@ -10,6 +10,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `NativeTextViewWrapper.isFocused` provides optional two-way first-responder
   coordination for embedders without changing AppKit-owned focus by default.
+- `HighlightJSBridge` lexes the code highlight.js leaves unscoped — in
+  Python every name, call and operator — the way CodeMirror's modes do:
+  `identifier`, `title.function.invoke`, `property`, `operator` and
+  `punctuation`, in 23 code languages with no per-language rules. Markup,
+  data and shells are left alone, and lexing runs after detection, so
+  `highlightAuto` picks the same language as before. Themes colour the new
+  scopes like any other (the GitHub themes leave names and punctuation at
+  the foreground colour).
+
+### Changed
+- **Breaking:** `MarkdownEngineCodeBlocks` no longer depends on
+  HighlighterSwift. `HighlighterSwiftBridge` is replaced by
+  `HighlightJSBridge`, which runs the same highlight.js 11.11.1 build
+  (bundled, all 192 languages) and colours its token tree from a
+  `CodeHighlightTheme` — a Swift colour per highlight.js scope — instead
+  of a CSS theme. HighlighterSwift's CSS parser dropped compound
+  selectors, so a nested scope took its parent's colour: function names
+  (`title.function`) coloured as `title`, `self`/`this`
+  (`variable.language`) as `variable`. Theme names become
+  `CodeHighlightTheme` values, and the default is now
+  `.githubLight`/`.githubDark` (was atom-one).
+- A fenced block's language is the info string's first word
+  (```` ```python title="x.py" ````), and a half-typed or mislabelled
+  block still highlights (highlight.js's `ignoreIllegals`).
 
 ### Fixed
 - Switching documents drops AppKit's blue autocorrection underline; it stood over the incoming document, and its range moved into the new text.

@@ -21,8 +21,10 @@ Sources/
 │   │   ├── NativeTextView/                  # AppKit subclass + UX extensions (paste, drag-select, …)
 │   │   └── Coordinator/                     # NSTextViewDelegate split by concern (restyling, find, …)
 │   └── MarkdownEngine.docc/                 # DocC catalog
-├── MarkdownEngineCodeBlocks/                # opt-in SPM product — pulls in HighlighterSwift
-│   └── HighlighterSwiftBridge.swift         # SyntaxHighlighter conformance
+├── MarkdownEngineCodeBlocks/                # opt-in SPM product — bundles highlight.js
+│   ├── HighlightJSBridge.swift              # SyntaxHighlighter conformance (JavaScriptCore)
+│   ├── CodeHighlightTheme.swift             # colour per highlight.js scope
+│   └── Resources/highlight.min.js           # highlight.js 11.11.1, all languages
 └── MarkdownEngineLatex/                     # opt-in SPM product — pulls in SwiftMath
     └── SwiftMathBridge.swift                # LatexRenderer conformance
 ```

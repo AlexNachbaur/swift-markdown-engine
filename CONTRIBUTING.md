@@ -59,7 +59,7 @@ Non-negotiable for the core `MarkdownEngine` target:
   target.** App-specific behaviors plug in through the four service
   protocols (`WikiLinkResolver`, `EmbeddedImageProvider`,
   `SyntaxHighlighter`, `LatexRenderer`) instead. The two existing
-  bridge products (`MarkdownEngineCodeBlocks` → HighlighterSwift,
+  bridge products (`MarkdownEngineCodeBlocks` → a bundled highlight.js,
   `MarkdownEngineLatex` → SwiftMath) are the deliberate exception so
   consumers can opt in. A new bridge or a new core dependency is a bigger
   call — make the case in the PR description.
