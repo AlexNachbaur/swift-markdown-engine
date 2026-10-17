@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `NativeTextViewWrapper.isFocused` provides optional two-way first-responder
   coordination for embedders without changing AppKit-owned focus by default.
+- `CodeBlockButton(onHover:)` reports the pointer over the copy button, so an
+  embedder can route it into `isCursorExcluded` and show the arrow there
+  instead of the text view's I-beam.
 - `HighlightJSBridge` lexes the code highlight.js leaves unscoped — in
   Python every name, call and operator — the way CodeMirror's modes do:
   `identifier`, `title.function.invoke`, `property`, `operator` and
