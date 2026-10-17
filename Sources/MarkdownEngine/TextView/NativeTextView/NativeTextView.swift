@@ -7,7 +7,8 @@
 //  AppKit `NSTextView` subclass used by the markdown editor. Stored state
 //  lives here; behavior is split across `NativeTextView+<Feature>.swift`
 //  files in this folder (frame & overscroll, caret workarounds, click remap,
-//  paste handling, drag-select boost, task checkbox, spelling policy).
+//  paste handling, drag-select boost, task checkbox, spelling policy, Writing
+//  Tools).
 //
 //  Bottom-overscroll math lives in `BottomOverscrollPolicy.swift`.
 //  Pasteboard image inspection lives in `PasteboardImageReader.swift`.
