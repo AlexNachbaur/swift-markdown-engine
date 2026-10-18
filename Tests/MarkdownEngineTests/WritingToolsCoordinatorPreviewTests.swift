@@ -57,6 +57,16 @@ struct WritingToolsCoordinatorPreviewTests {
                         snapshotLines: false)
     }
 
+    /// Opening another document mid-slide waits for the session to end, and the
+    /// binding already belongs to that document: the session's text must not reach it.
+    @Test(.enabled("no Writing Tools coordinator machinery in this process") { await CoordinatorDrive.cachedLongReport() != nil })
+    func documentSwitchMidSlideLeavesTheNextDocumentAlone() async throws {
+        let report = try #require(await CoordinatorDrive.run(
+            .init(readingWidth: nil, header: false, longRewrite: true, fromTop: false, switchMidSlide: true)))
+        #expect(report.foreignWrites == 0, "the rewritten document's text was written into the next document's binding")
+        #expect(report.switchApplied == true, "the next document never reached the text view")
+    }
+
     private func check(_ variant: CoordinatorDrive.Variant, snapshotLines: Bool = true) async throws {
         var report = await CoordinatorDrive.run(variant)
         if report == nil { report = await CoordinatorDrive.run(variant) }
@@ -94,6 +104,8 @@ private enum CoordinatorDrive {
         var proofread = false
         /// A list, task, quote, code block, rule and table right below the edit.
         var blocksBelow = false
+        /// Open another document mid-slide instead of finishing the session.
+        var switchMidSlide = false
     }
 
     struct Report: CustomStringConvertible {
@@ -110,6 +122,9 @@ private enum CoordinatorDrive {
         var inkBelowDuringSlide = -1
         var inkBelowAfterwards = -1
         var inkAboveDuringSlide = -1
+        /// Writes of anything but the next document's text into its binding.
+        var foreignWrites = 0
+        var switchApplied: Bool?
         var description: String { "bands \(bands) expected \(expectedLineTops) inkOffset \(String(describing: inkOffset))" }
     }
 
@@ -238,16 +253,28 @@ private enum CoordinatorDrive {
 
     // MARK: Hosting
 
+    /// One text for whichever document is open, bound the way Nodes binds it.
+    private final class Document: ObservableObject {
+        static let next = (1...30).map { "Other note \($0). Different content." }.joined(separator: "\n\n")
+        @Published var id = "A"
+        @Published var text: String {
+            didSet { if id != "A" && text != Self.next { foreignWrites += 1 } }
+        }
+        var foreignWrites = 0
+        init(text: String) { self.text = text }
+    }
+
     private struct Host: View {
-        @State var text: String
+        @ObservedObject var document: Document
         let readingWidth: CGFloat?
         let header: Bool
         var body: some View {
             var config = MarkdownEditorConfiguration.default
             config.readingWidth = readingWidth
             return NativeTextViewWrapper(
-                text: $text,
+                text: $document.text,
                 configuration: config,
+                documentId: document.id,
                 header: header ? AnyView(Color.gray.frame(height: 60)) : nil
             )
         }
@@ -314,7 +341,8 @@ private enum CoordinatorDrive {
             styleMask: [.borderless], backing: .buffered, defer: false
         )
         window.isReleasedWhenClosed = false
-        window.contentView = NSHostingView(rootView: Host(text: markdown(blocksBelow: variant.blocksBelow), readingWidth: variant.readingWidth, header: variant.header))
+        let document = Document(text: markdown(blocksBelow: variant.blocksBelow))
+        window.contentView = NSHostingView(rootView: Host(document: document, readingWidth: variant.readingWidth, header: variant.header))
         window.orderFrontRegardless()
         windows.append(window)
         defer { window.orderOut(nil) }
@@ -413,6 +441,25 @@ private enum CoordinatorDrive {
         let key = ObjectIdentifier(tv)
         _ = await spin(until: { (recorder.snapshots[key] ?? []).filter { $0.bands != nil }.count >= 2 }, limit: 1.5)
         let snapshots = recorder.snapshots[key] ?? []
+        let didEnd = NSSelectorFromString("didEndWritingToolsSession:accepted:")
+        typealias DidEnd = @convention(c) (AnyObject, Selector, AnyObject, Bool) -> Void
+
+        if variant.switchMidSlide {
+            await spin(0.5)
+            document.text = Document.next
+            document.id = "B"
+            await spin(0.05)
+            // The real service ends the session when the engine stops it; this one is told to.
+            if let didEndIMP = coordinator.method(for: didEnd) {
+                unsafeBitCast(didEndIMP, to: DidEnd.self)(coordinator, didEnd, session, false)
+            }
+            var result = Report()
+            result.switchApplied = await spin(until: { tv.string.hasPrefix("Other note") }, limit: 4)
+            await spin(0.3)
+            result.foreignWrites = document.foreignWrites
+            withExtendedLifetime(session) {}
+            return result
+        }
 
         // Mid-slide, then after the animation (the session and the window go last).
         await spin(0.3)
@@ -423,8 +470,6 @@ private enum CoordinatorDrive {
         let inkAboveDuringSlide = variant.fromTop ? -1 : inkCount(tv, in: lineAbove(selection, in: tv))
         await spin(1.5)
         let inkBelowAfterwards = inkCount(tv, in: below)
-        let didEnd = NSSelectorFromString("didEndWritingToolsSession:accepted:")
-        typealias DidEnd = @convention(c) (AnyObject, Selector, AnyObject, Bool) -> Void
         if let didEndIMP = coordinator.method(for: didEnd) {
             unsafeBitCast(didEndIMP, to: DidEnd.self)(coordinator, didEnd, session, true)
         }

@@ -38,8 +38,9 @@ extension NativeTextViewCoordinator {
         wtInitialChildOrigin = nil
         stopObservingUndoNotifications()
 
-        // Doc switched mid-session — discard WT results, the new node already loaded.
-        if wtStartDocumentId != nil && wtStartDocumentId != documentId {
+        // Doc switched mid-session, or a switch waits for this end: the binding
+        // already belongs to the new node, so the WT result is discarded.
+        if deferredNodeSwitch != nil || (wtStartDocumentId != nil && wtStartDocumentId != documentId) {
             wtStartDocumentId = nil
             return
         }
@@ -72,7 +73,9 @@ extension NativeTextViewCoordinator {
         }
         // Don't pre-set `lastSyncedText` — leaving it stale lets updateNSView do its
         // normal rebuild (restyle + re-measure) so the accepted WT result stays visible.
+        let target = documentId
         DispatchQueue.main.async { [self] in
+            guard bindingFollows(target) else { return }
             text = storage
         }
     }
@@ -149,6 +152,13 @@ extension NativeTextViewCoordinator {
         }
         RunLoop.main.add(timer, forMode: .common)
         deferredNodeSwitchTimer = timer
+    }
+
+    /// Whether text from the text view may still reach the binding. SwiftUI hands over
+    /// the next document's binding before a deferred switch reaches the text view, and
+    /// an async write can land after a switch.
+    func bindingFollows(_ documentId: String?) -> Bool {
+        deferredNodeSwitch == nil && documentId == self.documentId
     }
 
     func cancelDeferredNodeSwitch() {
