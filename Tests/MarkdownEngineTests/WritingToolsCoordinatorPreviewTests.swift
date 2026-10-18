@@ -2,12 +2,13 @@
 //  WritingToolsCoordinatorPreviewTests.swift
 //  MarkdownEngineTests
 //
-//  The doubled words below an inline rewrite on macOS 27: Writing Tools slides
-//  a snapshot of the text below the edit into place, and without
-//  `NativeTextView.didChangeText`'s commit that snapshot shows the lines where
-//  they stood BEFORE the rewrite. Drives NSWritingToolsCoordinator with a
-//  hand-made WTSession (no Apple Intelligence) and checks every line of the
-//  snapshot against where TextKit has it at that moment.
+//  The doubled words and missing paragraphs of an inline rewrite on macOS 27:
+//  Writing Tools animates from snapshots of the text view (the viewport before
+//  the edit, then the text below the new text), and without the commit in
+//  `NativeTextView+WritingTools` they show lines that are not drawn yet or not
+//  moved yet. Drives NSWritingToolsCoordinator with a hand-made WTSession (no
+//  Apple Intelligence) and checks every line of both snapshots against where
+//  TextKit has it at that moment.
 //
 //  Skips, not passes, when the machinery is absent or shaped differently from
 //  macOS 27.0.1 (`drivenABI`), or never asks for a snapshot (a CI VM).
@@ -31,7 +32,17 @@ struct WritingToolsCoordinatorPreviewTests {
 
     @Test(.enabled("no Writing Tools coordinator machinery in this process") { await CoordinatorDrive.cachedLongReport() != nil })
     func shorterRewriteInAReadingColumnUnderAHeader() async throws {
-        let variant = CoordinatorDrive.Variant(readingWidth: 650, header: true, longRewrite: false)
+        try await check(.init(readingWidth: 650, header: true, longRewrite: false, fromTop: false))
+    }
+
+    /// The paragraphs being rewritten come back undrawn when the "thinking"
+    /// animation ends, right before the viewport snapshot.
+    @Test(.enabled("no Writing Tools coordinator machinery in this process") { await CoordinatorDrive.cachedLongReport() != nil })
+    func rewriteOfTheFirstParagraphsKeepsThemInThePreEditSnapshot() async throws {
+        try await check(.init(readingWidth: nil, header: false, longRewrite: true, fromTop: true))
+    }
+
+    private func check(_ variant: CoordinatorDrive.Variant) async throws {
         var report = await CoordinatorDrive.run(variant)
         if report == nil { report = await CoordinatorDrive.run(variant) }
         check(try #require(report))
@@ -39,9 +50,14 @@ struct WritingToolsCoordinatorPreviewTests {
 
     private func check(_ report: CoordinatorDrive.Report) {
         #expect(report.inkOffset != nil, "could not read the glyph offset off the pre-edit snapshot: \(report)")
+        #expect(report.preEditMissingLineTops.isEmpty,
+                "pre-edit snapshot lacks lines \(report.preEditMissingLineTops); bands \(report.preEditBands)")
         #expect(report.expectedLineTops.count >= 3, "too few lines below the edit to judge: \(report)")
         #expect(report.missingLineTops.isEmpty,
-                "snapshot lacks lines at their current positions \(report.missingLineTops); bands \(report.bands)")
+                "remainder snapshot lacks lines at their current positions \(report.missingLineTops); bands \(report.bands)")
+        // The real text below must not show under the sliding snapshot, and must come back.
+        #expect(report.remainderHiddenDuringSlide, "the text below the rewrite showed under its sliding snapshot")
+        #expect(report.remainderVisibleAfterwards, "the text below the rewrite stayed hidden")
     }
 }
 
@@ -53,16 +69,22 @@ private enum CoordinatorDrive {
         let readingWidth: CGFloat?
         let header: Bool
         let longRewrite: Bool
+        /// Rewrite the first three paragraphs after a long "thinking" phase, as a real session does.
+        let fromTop: Bool
     }
 
     struct Report: CustomStringConvertible {
         /// Ink band tops of the remainder snapshot, points from its top.
         var bands: [CGFloat] = []
+        var preEditBands: [CGFloat] = []
+        var preEditMissingLineTops: [CGFloat] = []
         /// Tops of the lines below the edit, as TextKit had them when AppKit asked.
         var expectedLineTops: [CGFloat] = []
         var missingLineTops: [CGFloat] = []
         /// Glyph ink below a line's top, read off the pre-edit snapshot.
         var inkOffset: CGFloat?
+        var remainderHiddenDuringSlide = false
+        var remainderVisibleAfterwards = false
         var description: String { "bands \(bands) expected \(expectedLineTops) inkOffset \(String(describing: inkOffset))" }
     }
 
@@ -71,7 +93,7 @@ private enum CoordinatorDrive {
 
     static func cachedLongReport() async -> Report? {
         if let cached = longReport { return cached }
-        let report = await run(.init(readingWidth: nil, header: false, longRewrite: true))
+        let report = await run(.init(readingWidth: nil, header: false, longRewrite: true, fromTop: false))
         longReport = .some(report)
         return report
     }
@@ -268,10 +290,12 @@ private enum CoordinatorDrive {
         await spin(0.4)
         recorder.snapshots[ObjectIdentifier(tv)] = []
 
-        // Select paragraph 40 and put it near the top: plenty of text below it.
+        // Select paragraph 40 and put it near the top (plenty of text below it), or the first three.
         let ns = tv.string as NSString
         let paragraph = ns.paragraphRange(for: NSRange(location: ns.range(of: "Paragraph 40.").location, length: 0))
-        let selection = NSRange(location: paragraph.location, length: paragraph.length - 1)
+        let selection = variant.fromTop
+            ? NSRange(location: 0, length: ns.range(of: "Paragraph 4.").location - 1)
+            : NSRange(location: paragraph.location, length: paragraph.length - 1)
         tv.setSelectedRange(selection)
         tlm.ensureLayout(for: tlm.documentRange)
         guard let start = tlm.location(tlm.documentRange.location, offsetBy: selection.location),
@@ -317,7 +341,7 @@ private enum CoordinatorDrive {
         typealias Action = @convention(c) (AnyObject, Selector, AnyObject, Int) -> Void
         guard let actionIMP = coordinator.method(for: action) else { return nil }
         unsafeBitCast(actionIMP, to: Action.self)(coordinator, action, session, 3)
-        await spin(0.6)
+        await spin(variant.fromTop ? 1.6 : 0.6)
 
         // Deliver with the paragraph's own attributes, as Writing Tools does.
         let body = variant.longRewrite
@@ -336,8 +360,12 @@ private enum CoordinatorDrive {
         _ = await spin(until: { (recorder.snapshots[key] ?? []).filter { $0.bands != nil }.count >= 2 }, limit: 1.5)
         let snapshots = recorder.snapshots[key] ?? []
 
-        // Let the animation finish before the session and the window go.
-        await spin(1.2)
+        // Mid-slide, then after the animation (the session and the window go last).
+        await spin(0.3)
+        let remainderRect = snapshots.last?.rect ?? .zero
+        let hiddenDuringSlide = firstLineBelowIsHidden(tv, rect: remainderRect)
+        await spin(1.5)
+        let visibleAfterwards = !firstLineBelowIsHidden(tv, rect: remainderRect)
         let didEnd = NSSelectorFromString("didEndWritingToolsSession:accepted:")
         typealias DidEnd = @convention(c) (AnyObject, Selector, AnyObject, Bool) -> Void
         if let didEndIMP = coordinator.method(for: didEnd) {
@@ -348,8 +376,27 @@ private enum CoordinatorDrive {
 
         guard snapshots.count >= 2, let before = snapshots.first, let beforeBands = before.bands,
               let remainder = snapshots.last, let bands = remainder.bands else { return nil }
-        return report(before: before.lineTops, beforeBands: beforeBands,
-                      after: remainder.lineTops, afterBands: bands, height: remainder.rect.height)
+        var result = report(before: before.lineTops, beforeBands: beforeBands,
+                            after: remainder.lineTops, afterBands: bands, height: remainder.rect.height)
+        result.remainderHiddenDuringSlide = hiddenDuringSlide
+        result.remainderVisibleAfterwards = visibleAfterwards
+        return result
+    }
+
+    /// Whether the first line with text below `rect`'s top draws with a clear foreground.
+    private static func firstLineBelowIsHidden(_ tv: NSTextView, rect: CGRect) -> Bool {
+        guard let tlm = tv.textLayoutManager,
+              let top = lineTops(tv, in: rect).first(where: { $0 >= -1 }),
+              let fragment = tlm.textLayoutFragment(for: CGPoint(x: 1, y: rect.minY + top - tv.textContainerOrigin.y + 1))
+        else { return false }
+        let location = fragment.rangeInElement.location
+        var hidden = false
+        tlm.enumerateRenderingAttributes(from: tlm.documentRange.location, reverse: false) { _, attributes, range in
+            guard range.contains(location) else { return true }
+            hidden = (attributes[.foregroundColor] as? NSColor).map { $0.alphaComponent < 0.01 } ?? false
+            return false
+        }
+        return hidden
     }
 
     /// The glyph offset is the one shift that puts the most pre-edit line tops onto
@@ -358,12 +405,16 @@ private enum CoordinatorDrive {
                                after: [CGFloat], afterBands: [CGFloat], height: CGFloat) -> Report {
         var report = Report()
         report.bands = afterBands
+        report.preEditBands = beforeBands
         func hits(_ offset: CGFloat) -> Int {
             before.filter { top in beforeBands.contains { abs($0 - (top + offset)) <= 1 } }.count
         }
         let candidates = before.flatMap { top in beforeBands.map { $0 - top } }.filter { $0 >= 0 && $0 <= 12 }
         guard let best = candidates.max(by: { hits($0) < hits($1) }), hits(best) >= 3 else { return report }
         report.inkOffset = best
+        report.preEditMissingLineTops = before.filter { $0 + best >= 1 && $0 + best <= height - 30 }.filter { top in
+            !beforeBands.contains { abs($0 - (top + best)) <= 1.5 }
+        }
         report.expectedLineTops = Array(after.filter { $0 + best >= 1 && $0 + best <= height - 30 }.prefix(4))
         report.missingLineTops = report.expectedLineTops.filter { top in
             !afterBands.contains { abs($0 - (top + best)) <= 1.5 }

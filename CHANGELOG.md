@@ -25,10 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - On macOS 27, Writing Tools use the inline experience
   (`writingToolsBehavior = .complete`): a rewrite morphs in place instead of
-  landing in the popover. The text below the rewrite slides into place without
-  doubling: AppKit snapshots it before moving its lines, so `NativeTextView`
-  commits them first. 15.1–26 keep `.limited`, because inline they dim the
-  text below a mid-document rewrite.
+  landing in the popover. Two AppKit bugs in that animation are worked around
+  in `NativeTextView`: its snapshots were taken before the line views were
+  moved and drawn (rewritten paragraphs missing, the text below landing one
+  rewrite-height off), and the text below was never hidden while its snapshot
+  slid into place (doubled words). 15.1–26 keep `.limited`, because inline
+  they dim the text below a mid-document rewrite.
 - **Breaking:** `MarkdownEngineCodeBlocks` no longer depends on
   HighlighterSwift. `HighlighterSwiftBridge` is replaced by
   `HighlightJSBridge`, which runs the same highlight.js 11.11.1 build

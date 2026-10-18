@@ -88,6 +88,10 @@ final class NativeTextView: NSTextView {
     /// Persisted horizontal scroll offset per wide table; survives restyles.
     var tableHorizontalScrollOffsets: [Int: CGFloat] = [:]
 
+    /// The text below an inline rewrite, hidden while Writing Tools slide its
+    /// snapshot into place (`NativeTextView+WritingTools`).
+    var writingToolsHiddenRemainder: NSTextRange?
+
     override func viewWillMove(toWindow newWindow: NSWindow?) {
         if let window, window !== newWindow {
             NotificationCenter.default.removeObserver(self, name: NSWindow.willCloseNotification, object: window)
