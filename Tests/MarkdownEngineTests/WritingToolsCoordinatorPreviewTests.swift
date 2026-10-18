@@ -42,22 +42,41 @@ struct WritingToolsCoordinatorPreviewTests {
         try await check(.init(readingWidth: nil, header: false, longRewrite: true, fromTop: true))
     }
 
-    private func check(_ variant: CoordinatorDrive.Variant) async throws {
-        var report = await CoordinatorDrive.run(variant)
-        if report == nil { report = await CoordinatorDrive.run(variant) }
-        check(try #require(report))
+    /// A proofread's context is one paragraph, so Apple's ranges are relative to it:
+    /// read as document offsets they hid text above the edit.
+    @Test(.enabled("no Writing Tools coordinator machinery in this process") { await CoordinatorDrive.cachedLongReport() != nil })
+    func proofreadMidDocumentHidesOnlyTheTextBelow() async throws {
+        try await check(.init(readingWidth: 650, header: true, longRewrite: false, fromTop: false, proofread: true))
     }
 
-    private func check(_ report: CoordinatorDrive.Report) {
-        #expect(report.inkOffset != nil, "could not read the glyph offset off the pre-edit snapshot: \(report)")
-        #expect(report.preEditMissingLineTops.isEmpty,
-                "pre-edit snapshot lacks lines \(report.preEditMissingLineTops); bands \(report.preEditBands)")
-        #expect(report.expectedLineTops.count >= 3, "too few lines below the edit to judge: \(report)")
-        #expect(report.missingLineTops.isEmpty,
-                "remainder snapshot lacks lines at their current positions \(report.missingLineTops); bands \(report.bands)")
-        // The real text below must not show under the sliding snapshot, and must come back.
-        #expect(report.remainderHiddenDuringSlide, "the text below the rewrite showed under its sliding snapshot")
-        #expect(report.remainderVisibleAfterwards, "the text below the rewrite stayed hidden")
+    /// Bullets, tasks, quote bars, code backgrounds, rules and tables are painted by
+    /// the fragment, not as glyphs: a clear foreground alone left them doubled.
+    @Test(.enabled("no Writing Tools coordinator machinery in this process") { await CoordinatorDrive.cachedLongReport() != nil })
+    func rewriteHidesFragmentDrawnBlocksBelow() async throws {
+        try await check(.init(readingWidth: 650, header: true, longRewrite: true, fromTop: false, blocksBelow: true),
+                        snapshotLines: false)
+    }
+
+    private func check(_ variant: CoordinatorDrive.Variant, snapshotLines: Bool = true) async throws {
+        var report = await CoordinatorDrive.run(variant)
+        if report == nil { report = await CoordinatorDrive.run(variant) }
+        check(try #require(report), snapshotLines: snapshotLines)
+    }
+
+    private func check(_ report: CoordinatorDrive.Report, snapshotLines: Bool = true) {
+        if snapshotLines {
+            #expect(report.inkOffset != nil, "could not read the glyph offset off the pre-edit snapshot: \(report)")
+            #expect(report.preEditMissingLineTops.isEmpty,
+                    "pre-edit snapshot lacks lines \(report.preEditMissingLineTops); bands \(report.preEditBands)")
+            #expect(report.expectedLineTops.count >= 3, "too few lines below the edit to judge: \(report)")
+            #expect(report.missingLineTops.isEmpty,
+                    "remainder snapshot lacks lines at their current positions \(report.missingLineTops); bands \(report.bands)")
+        }
+        // What the text view draws: nothing below the edit under the sliding snapshot,
+        // all of it afterwards, and the text above the edit throughout.
+        #expect(report.inkBelowDuringSlide == 0, "the text below the edit drew \(report.inkBelowDuringSlide) px under its sliding snapshot")
+        #expect(report.inkBelowAfterwards > 0, "the text below the edit stayed hidden")
+        #expect(report.inkAboveDuringSlide != 0, "the text above the edit was hidden")
     }
 }
 
@@ -71,6 +90,10 @@ private enum CoordinatorDrive {
         let longRewrite: Bool
         /// Rewrite the first three paragraphs after a long "thinking" phase, as a real session does.
         let fromTop: Bool
+        /// Proofread one suggestion instead of rewriting the paragraph.
+        var proofread = false
+        /// A list, task, quote, code block, rule and table right below the edit.
+        var blocksBelow = false
     }
 
     struct Report: CustomStringConvertible {
@@ -83,8 +106,10 @@ private enum CoordinatorDrive {
         var missingLineTops: [CGFloat] = []
         /// Glyph ink below a line's top, read off the pre-edit snapshot.
         var inkOffset: CGFloat?
-        var remainderHiddenDuringSlide = false
-        var remainderVisibleAfterwards = false
+        /// Ink pixels the text view draws below the edit (and in the line above it); -1 = none to judge.
+        var inkBelowDuringSlide = -1
+        var inkBelowAfterwards = -1
+        var inkAboveDuringSlide = -1
         var description: String { "bands \(bands) expected \(expectedLineTops) inkOffset \(String(describing: inkOffset))" }
     }
 
@@ -113,6 +138,9 @@ private enum CoordinatorDrive {
         ("WTSession", "initWithType:textViewDelegate:", "@32@0:8q16@24"),
         ("WTSession", "setCompositionSessionType:", "v24@0:8q16"),
         ("WTContext", "range", "{_NSRange=QQ}16@0:8"),
+        ("WTContext", "attributedText", "@16@0:8"),
+        ("WTTextSuggestion", "initWithOriginalRange:replacement:", "@40@0:8{_NSRange=QQ}16@32"),
+        ("NSWritingToolsCoordinator", "proofreadingSession:didReceiveSuggestions:processedRange:inContext:finished:", "v60@0:8@16@24{_NSRange=QQ}32@48B56"),
     ]
 
     private static var machineryPresent: Bool {
@@ -225,9 +253,16 @@ private enum CoordinatorDrive {
         }
     }
 
-    private static let markdown = (1...120).map {
-        "Paragraph \($0). The quick brown fox jumps over the lazy dog while the writing tools think about it."
-    }.joined(separator: "\n\n")
+    private static func markdown(blocksBelow: Bool) -> String {
+        var paragraphs = (1...120).map {
+            "Paragraph \($0). The quick brown fox jumps over the lazy dog while the writing tools think about it."
+        }
+        if blocksBelow {
+            paragraphs.insert(contentsOf: ["- bullet one\n- bullet two", "- [ ] a task", "> a quote", "```\ncode\n```", "---",
+                                           "| a | b |\n|---|---|\n| 1 | 2 |"], at: 40)
+        }
+        return paragraphs.joined(separator: "\n\n")
+    }
 
     /// AppKit keeps effect work in flight past the session; a torn-down window under it crashes the host.
     private static var windows: [NSWindow] = []
@@ -279,7 +314,7 @@ private enum CoordinatorDrive {
             styleMask: [.borderless], backing: .buffered, defer: false
         )
         window.isReleasedWhenClosed = false
-        window.contentView = NSHostingView(rootView: Host(text: markdown, readingWidth: variant.readingWidth, header: variant.header))
+        window.contentView = NSHostingView(rootView: Host(text: markdown(blocksBelow: variant.blocksBelow), readingWidth: variant.readingWidth, header: variant.header))
         window.orderFrontRegardless()
         windows.append(window)
         defer { window.orderOut(nil) }
@@ -316,9 +351,9 @@ private enum CoordinatorDrive {
               let sessionCls = NSClassFromString("WTSession") as? NSObject.Type,
               let allocated = sessionCls.perform(NSSelectorFromString("alloc"))?.takeUnretainedValue(),
               let initIMP = class_getMethodImplementation(sessionCls, initSel) else { return nil }
-        // Type 2 = composition; composition type 10 = the animated inline replace.
-        let session = unsafeBitCast(initIMP, to: Init.self)(allocated, initSel, 2, nil).takeRetainedValue() as! NSObject
-        session.setValue(10, forKey: "compositionSessionType")
+        // Type 1 = proofread, 2 = composition; composition type 10 = the animated inline replace.
+        let session = unsafeBitCast(initIMP, to: Init.self)(allocated, initSel, variant.proofread ? 1 : 2, nil).takeRetainedValue() as! NSObject
+        if !variant.proofread { session.setValue(10, forKey: "compositionSessionType") }
 
         let box = ContextBox()
         let willBegin = NSSelectorFromString("willBeginWritingToolsSession:requestContexts:")
@@ -348,12 +383,31 @@ private enum CoordinatorDrive {
             ? (0..<5).map { "Rewritten sentence \($0) that is longer than the original paragraph was." }.joined(separator: " ")
             : "A much shorter rewrite."
         let attributes = tv.textStorage?.attributes(at: selection.location, effectiveRange: nil) ?? [:]
-        let deliver = NSSelectorFromString("compositionSession:didReceiveText:replacementRange:inContext:finished:")
-        typealias Deliver = @convention(c) (AnyObject, Selector, AnyObject, NSAttributedString, NSRange, AnyObject, Bool) -> Void
-        guard let deliverIMP = coordinator.method(for: deliver) else { return nil }
-        unsafeBitCast(deliverIMP, to: Deliver.self)(
-            coordinator, deliver, session, NSAttributedString(string: body, attributes: attributes), contextRange, context, true
-        )
+        if variant.proofread {
+            // One suggestion that wraps the paragraph onto another line.
+            let contextText = (context.value(forKey: "attributedText") as? NSAttributedString)?.string as NSString? ?? ""
+            let word = contextText.range(of: "quick", options: [], range: NSRange(
+                location: contextRange.location, length: min(contextRange.length, contextText.length - contextRange.location)))
+            let suggestionInit = NSSelectorFromString("initWithOriginalRange:replacement:")
+            typealias SuggestionInit = @convention(c) (AnyObject, Selector, NSRange, NSString) -> Unmanaged<AnyObject>
+            guard word.location != NSNotFound, let suggestionCls = NSClassFromString("WTTextSuggestion") as? NSObject.Type,
+                  let allocatedSuggestion = suggestionCls.perform(NSSelectorFromString("alloc"))?.takeUnretainedValue(),
+                  let suggestionIMP = class_getMethodImplementation(suggestionCls, suggestionInit) else { return nil }
+            let suggestion = unsafeBitCast(suggestionIMP, to: SuggestionInit.self)(
+                allocatedSuggestion, suggestionInit, word, "remarkably and unbelievably quick, faster than anything seen before" as NSString
+            ).takeRetainedValue()
+            let deliver = NSSelectorFromString("proofreadingSession:didReceiveSuggestions:processedRange:inContext:finished:")
+            typealias Deliver = @convention(c) (AnyObject, Selector, AnyObject, NSArray, NSRange, AnyObject, Bool) -> Void
+            guard let deliverIMP = coordinator.method(for: deliver) else { return nil }
+            unsafeBitCast(deliverIMP, to: Deliver.self)(coordinator, deliver, session, [suggestion] as NSArray, contextRange, context, true)
+        } else {
+            let deliver = NSSelectorFromString("compositionSession:didReceiveText:replacementRange:inContext:finished:")
+            typealias Deliver = @convention(c) (AnyObject, Selector, AnyObject, NSAttributedString, NSRange, AnyObject, Bool) -> Void
+            guard let deliverIMP = coordinator.method(for: deliver) else { return nil }
+            unsafeBitCast(deliverIMP, to: Deliver.self)(
+                coordinator, deliver, session, NSAttributedString(string: body, attributes: attributes), contextRange, context, true
+            )
+        }
 
         // The pre-edit viewport snapshot, then the remainder below the new text.
         let key = ObjectIdentifier(tv)
@@ -362,10 +416,13 @@ private enum CoordinatorDrive {
 
         // Mid-slide, then after the animation (the session and the window go last).
         await spin(0.3)
-        let remainderRect = snapshots.last?.rect ?? .zero
-        let hiddenDuringSlide = firstLineBelowIsHidden(tv, rect: remainderRect)
+        // The remainder rect starts at the end of the new text; skip the caret line.
+        let below = (snapshots.last?.rect ?? .zero).insetBy(dx: 0, dy: 15).offsetBy(dx: 0, dy: 15).intersection(tv.visibleRect)
+        let inkBelowDuringSlide = inkCount(tv, in: below)
+        // The last line of the paragraph above the edit (none when rewriting from the top).
+        let inkAboveDuringSlide = variant.fromTop ? -1 : inkCount(tv, in: lineAbove(selection, in: tv))
         await spin(1.5)
-        let visibleAfterwards = !firstLineBelowIsHidden(tv, rect: remainderRect)
+        let inkBelowAfterwards = inkCount(tv, in: below)
         let didEnd = NSSelectorFromString("didEndWritingToolsSession:accepted:")
         typealias DidEnd = @convention(c) (AnyObject, Selector, AnyObject, Bool) -> Void
         if let didEndIMP = coordinator.method(for: didEnd) {
@@ -378,25 +435,39 @@ private enum CoordinatorDrive {
               let remainder = snapshots.last, let bands = remainder.bands else { return nil }
         var result = report(before: before.lineTops, beforeBands: beforeBands,
                             after: remainder.lineTops, afterBands: bands, height: remainder.rect.height)
-        result.remainderHiddenDuringSlide = hiddenDuringSlide
-        result.remainderVisibleAfterwards = visibleAfterwards
+        result.inkBelowDuringSlide = inkBelowDuringSlide
+        result.inkBelowAfterwards = inkBelowAfterwards
+        result.inkAboveDuringSlide = inkAboveDuringSlide
         return result
     }
 
-    /// Whether the first line with text below `rect`'s top draws with a clear foreground.
-    private static func firstLineBelowIsHidden(_ tv: NSTextView, rect: CGRect) -> Bool {
-        guard let tlm = tv.textLayoutManager,
-              let top = lineTops(tv, in: rect).first(where: { $0 >= -1 }),
-              let fragment = tlm.textLayoutFragment(for: CGPoint(x: 1, y: rect.minY + top - tv.textContainerOrigin.y + 1))
-        else { return false }
-        let location = fragment.rangeInElement.location
-        var hidden = false
-        tlm.enumerateRenderingAttributes(from: tlm.documentRange.location, reverse: false) { _, attributes, range in
-            guard range.contains(location) else { return true }
-            hidden = (attributes[.foregroundColor] as? NSColor).map { $0.alphaComponent < 0.01 } ?? false
-            return false
-        }
-        return hidden
+    /// Pixels with ink in a fresh draw of `rect` (the text view draws no background here).
+    private static func inkCount(_ tv: NSTextView, in rect: NSRect) -> Int {
+        let area = rect.intersection(tv.bounds)
+        guard !area.isEmpty, let rep = tv.bitmapImageRepForCachingDisplay(in: area) else { return -1 }
+        tv.cacheDisplay(in: area, to: rep)
+        guard let image = rep.cgImage else { return -1 }
+        let pointsTall = area.height
+        return inkBandTops(image, pointsTall: pointsTall).isEmpty ? 0 : inkPixels(image)
+    }
+
+    private static func inkPixels(_ image: CGImage) -> Int {
+        let width = image.width, height = image.height
+        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let data = context.data else { return -1 }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        let pixels = data.bindMemory(to: UInt8.self, capacity: width * height * 4)
+        return (0..<(width * height)).reduce(0) { $0 + (pixels[$1 * 4 + 3] > 40 ? 1 : 0) }
+    }
+
+    /// The paragraph just above `selection`'s, in text view coordinates.
+    private static func lineAbove(_ selection: NSRange, in tv: NSTextView) -> NSRect {
+        guard selection.location >= 3, let tlm = tv.textLayoutManager, let content = tlm.textContentManager,
+              let above = content.location(content.documentRange.location, offsetBy: selection.location - 3),
+              let fragment = tlm.textLayoutFragment(for: above) else { return .zero }
+        return fragment.layoutFragmentFrame.offsetBy(dx: tv.textContainerOrigin.x, dy: tv.textContainerOrigin.y)
     }
 
     /// The glyph offset is the one shift that puts the most pre-edit line tops onto

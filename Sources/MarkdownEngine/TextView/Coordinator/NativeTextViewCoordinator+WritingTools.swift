@@ -27,6 +27,11 @@ extension NativeTextViewCoordinator {
 
     @available(macOS 15.0, *)
     public func textViewWritingToolsDidEnd(_ textView: NSTextView) {
+        // Backstop: nothing may stay hidden past the session.
+        if let native = textView as? NativeTextView {
+            native.showWritingToolsRemainder()
+            native.writingToolsContextStarts = [:]
+        }
         guard isWritingToolsActive else { return }
         isWritingToolsActive = false
         wtChildWindow = nil
@@ -124,5 +129,31 @@ extension NativeTextViewCoordinator {
             fixed.origin = correctOrigin
             childWin.setFrame(fixed, display: false)
         }
+    }
+
+    /// Stops the session (its result is dropped: the document is about to change)
+    /// and replays the latest switch once the coordinator leaves `.interactiveStreaming`.
+    @available(macOS 15.2, *)
+    func deferNodeSwitch(until writingTools: NSWritingToolsCoordinator, replay: @escaping () -> Void) {
+        deferredNodeSwitch = replay
+        guard deferredNodeSwitchTimer == nil else { return }
+        writingTools.stopWritingTools()
+        let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self, weak writingTools] timer in
+            MainActor.assumeIsolated {
+                guard let self else { return timer.invalidate() }
+                if let writingTools, writingTools.state == .interactiveStreaming { return }
+                let replay = self.deferredNodeSwitch
+                self.cancelDeferredNodeSwitch()
+                replay?()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        deferredNodeSwitchTimer = timer
+    }
+
+    func cancelDeferredNodeSwitch() {
+        deferredNodeSwitchTimer?.invalidate()
+        deferredNodeSwitchTimer = nil
+        deferredNodeSwitch = nil
     }
 }

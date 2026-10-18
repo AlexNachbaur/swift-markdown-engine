@@ -115,6 +115,9 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     var wtUndoObserverTokens: [NSObjectProtocol] = []
     var wtUndoneDuringSession: Bool = false
     var wtPostUndoSnapshot: String?
+    /// A document switch waiting for a streaming Writing Tools session to settle.
+    var deferredNodeSwitch: (() -> Void)?
+    var deferredNodeSwitchTimer: Timer?
     var lastAppliedInlineReplacementID: UUID?
     var activeTokenIndices: Set<Int> = []
     var previousActiveTokenIndices: Set<Int> = []

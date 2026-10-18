@@ -4,20 +4,21 @@
 //
 //  Created by Luca Chen on 18.10.26.
 //
-//  Two macOS 27 inline-rewrite bugs, both in NSTextView's own (undeclared)
-//  NSWritingToolsCoordinator delegate methods, so each override calls
-//  NSTextView's IMP around a fix. With paragraph spacing a plain NSTextView
-//  shows them too.
+//  Inline Writing Tools on macOS 27 run through NSTextView's own, undeclared
+//  NSWritingToolsCoordinator delegate methods, and those have three bugs a plain
+//  NSTextView shows too (measured on 27.0.1). Each override fixes one and then
+//  calls NSTextView's IMP. If an SDK ever declares these selectors, the build
+//  fails here and they become plain overrides.
 //
 
 import AppKit
 import ObjectiveC
+import os
 
 extension NativeTextView {
-    /// The rewrite animates from snapshots: the viewport before the edit, then the
-    /// text below the new text. AppKit takes them from the viewport's line views
-    /// before it has moved and drawn them, so the rewritten paragraphs are missing
-    /// and the text below lands one rewrite-height off. Committing first fixes both.
+    /// The rewrite animates from snapshots of the text view, taken before AppKit's
+    /// own pending layout and display ran: the paragraphs being rewritten come out
+    /// missing and the text below one rewrite-height off. Finish that pass first.
     @available(macOS 15.2, *)
     @objc(writingToolsCoordinator:requestsPreviewForRect:inContext:completion:)
     func writingToolsCoordinatorSnapshot(_ coordinator: NSWritingToolsCoordinator, for rect: NSRect,
@@ -25,23 +26,30 @@ extension NativeTextView {
                                          completion: @escaping (NSTextPreview?) -> Void) {
         let selector = NSSelectorFromString("writingToolsCoordinator:requestsPreviewForRect:inContext:completion:")
         guard let method = class_getInstanceMethod(NSTextView.self, selector) else { return completion(nil) }
-        CATransaction.flush()
+        window?.displayIfNeeded()
         typealias Snapshot = @convention(c) (NSTextView, Selector, NSWritingToolsCoordinator, NSRect,
                                              NSWritingToolsCoordinator.Context,
                                              @escaping @convention(block) (NSTextPreview?) -> Void) -> Void
         unsafeBitCast(method_getImplementation(method), to: Snapshot.self)(self, selector, coordinator, rect, context, completion)
     }
 
-    /// `.translate` slides that second snapshot into place, and the delegate has to
-    /// hide the text "between the insertion point and the end of your text storage"
-    /// meanwhile (NSWritingToolsCoordinator.h). NSTextView is handed an empty range
-    /// and hides nothing, so the real text shows under the sliding snapshot.
+    /// `.translate` slides a snapshot of the text below the edit into place, and the
+    /// delegate has to hide that text meanwhile (NSWritingToolsCoordinator.h).
+    /// NSTextView hides nothing, so the real text showed under it: doubled words.
     @available(macOS 15.2, *)
     @objc(writingToolsCoordinator:prepareForTextAnimation:forRange:inContext:completion:)
     func writingToolsCoordinatorPrepare(_ coordinator: NSWritingToolsCoordinator,
                                         for animation: NSWritingToolsCoordinator.TextAnimation, range: NSRange,
                                         in context: NSWritingToolsCoordinator.Context, completion: @escaping () -> Void) {
-        if animation == .translate { hideWritingToolsRemainder(from: range.location) }
+        if animation == .translate {
+            // The range is relative to the context: one paragraph for a proofread.
+            if let start = writingToolsContextStarts[context.identifier] {
+                hideWritingToolsRemainder(from: start + range.location)
+            } else {
+                Logger(subsystem: "MarkdownEngine", category: "WritingTools")
+                    .fault("no document offset for a Writing Tools context; text below the edit stays visible")
+            }
+        }
         callTextAnimationSuper("writingToolsCoordinator:prepareForTextAnimation:forRange:inContext:completion:",
                                coordinator, animation, range, context, completion)
     }
@@ -56,6 +64,43 @@ extension NativeTextView {
                                coordinator, animation, range, context, completion)
     }
 
+    /// Records where each context starts in the document while the text still
+    /// matches it: a rewrite's context is the whole document, a proofread's the
+    /// selected paragraphs, and every range Writing Tools sends is relative to it.
+    @available(macOS 15.2, *)
+    @objc(writingToolsCoordinator:requestsContextsForScope:completion:)
+    func writingToolsCoordinatorContexts(_ coordinator: NSWritingToolsCoordinator,
+                                         for scope: NSWritingToolsCoordinator.ContextScope,
+                                         completion: @escaping ([NSWritingToolsCoordinator.Context]) -> Void) {
+        let selector = NSSelectorFromString("writingToolsCoordinator:requestsContextsForScope:completion:")
+        guard let method = class_getInstanceMethod(NSTextView.self, selector) else { return completion([]) }
+        typealias Contexts = @convention(c) (NSTextView, Selector, NSWritingToolsCoordinator, NSWritingToolsCoordinator.ContextScope,
+                                             @escaping @convention(block) ([NSWritingToolsCoordinator.Context]) -> Void) -> Void
+        unsafeBitCast(method_getImplementation(method), to: Contexts.self)(self, selector, coordinator, scope) { [weak self] contexts in
+            if let self {
+                self.writingToolsContextStarts = [:]
+                for context in contexts {
+                    if let start = self.documentStart(of: context) { self.writingToolsContextStarts[context.identifier] = start }
+                }
+            }
+            completion(contexts)
+        }
+    }
+
+    /// The whole document, or the selection's paragraphs; nil rather than a guess.
+    @available(macOS 15.2, *)
+    private func documentStart(of context: NSWritingToolsCoordinator.Context) -> Int? {
+        let document = string as NSString
+        let text = context.attributedString.string
+        let length = (text as NSString).length
+        guard length > 0, length <= document.length else { return nil }
+        if length == document.length { return document.isEqual(to: text) ? 0 : nil }
+        let start = selectedRange().location - context.range.location
+        guard start >= 0, start + length <= document.length,
+              document.substring(with: NSRange(location: start, length: length)) == text else { return nil }
+        return start
+    }
+
     @available(macOS 15.2, *)
     private func callTextAnimationSuper(_ name: String, _ coordinator: NSWritingToolsCoordinator,
                                         _ animation: NSWritingToolsCoordinator.TextAnimation, _ range: NSRange,
@@ -67,27 +112,33 @@ extension NativeTextView {
         unsafeBitCast(method_getImplementation(method), to: Animation.self)(self, selector, coordinator, animation, range, context, completion)
     }
 
+    /// The rest of the edited paragraph gets a clear foreground; fragments after it
+    /// stop drawing (MarkdownTextLayoutFragment checks `writingToolsHiddenRemainder`),
+    /// because a clear foreground leaves bullets, bars, code backgrounds and tables.
     private func hideWritingToolsRemainder(from location: Int) {
         showWritingToolsRemainder()
-        guard let tlm = textLayoutManager, let content = tlm.textContentManager,
-              let start = content.location(content.documentRange.location, offsetBy: location),
-              let remainder = NSTextRange(location: start, end: content.documentRange.endLocation),
-              !remainder.isEmpty else { return }
-        tlm.addRenderingAttribute(.foregroundColor, value: NSColor.clear, for: remainder)
-        writingToolsHiddenRemainder = remainder
+        let document = string as NSString
+        guard let tlm = textLayoutManager, let content = tlm.textContentManager, location <= document.length,
+              let start = content.location(content.documentRange.location, offsetBy: location) else { return }
+        let paragraphEnd = location < document.length
+            ? NSMaxRange(document.paragraphRange(for: NSRange(location: location, length: 0))) : location
+        let end = content.location(content.documentRange.location, offsetBy: paragraphEnd) ?? start
+        guard let tail = NSTextRange(location: start, end: end) else { return }
+        if !tail.isEmpty { tlm.addRenderingAttribute(.foregroundColor, value: NSColor.clear, for: tail) }
+        writingToolsHiddenRemainder = tail
         redrawLineViews()
     }
 
-    private func showWritingToolsRemainder() {
-        guard let remainder = writingToolsHiddenRemainder, let tlm = textLayoutManager else { return }
+    /// Also the backstop at session end and on a document switch: idempotent.
+    func showWritingToolsRemainder() {
+        guard let tail = writingToolsHiddenRemainder else { return }
         writingToolsHiddenRemainder = nil
-        let end = tlm.textContentManager?.documentRange.endLocation ?? remainder.endLocation
-        tlm.removeRenderingAttribute(.foregroundColor, for: NSTextRange(location: remainder.location, end: end) ?? remainder)
+        if !tail.isEmpty { textLayoutManager?.removeRenderingAttribute(.foregroundColor, for: tail) }
         redrawLineViews()
     }
 
-    /// A rendering-attribute change alone left the line views as drawn in Nodes
-    /// (measured on 27.0.1): the "hidden" text stayed on screen.
+    /// After a rendering-attribute change NSTextView repaints only its own layer, not
+    /// TextKit 2's line views (AppKit itself uses the private `_setTextRangeNeedsDisplay:`).
     private func redrawLineViews() {
         func redraw(_ view: NSView) {
             view.needsDisplay = true

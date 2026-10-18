@@ -88,9 +88,12 @@ final class NativeTextView: NSTextView {
     /// Persisted horizontal scroll offset per wide table; survives restyles.
     var tableHorizontalScrollOffsets: [Int: CGFloat] = [:]
 
-    /// The text below an inline rewrite, hidden while Writing Tools slide its
-    /// snapshot into place (`NativeTextView+WritingTools`).
+    /// While Writing Tools slide the text below an edit into place: the rest of the
+    /// edited paragraph; fragments from its end on are not drawn (`NativeTextView+WritingTools`).
     var writingToolsHiddenRemainder: NSTextRange?
+    /// Where each Writing Tools context starts in the document: its ranges are
+    /// relative to it (a proofread's context is one paragraph, a rewrite's the document).
+    var writingToolsContextStarts: [UUID: Int] = [:]
 
     override func viewWillMove(toWindow newWindow: NSWindow?) {
         if let window, window !== newWindow {

@@ -38,7 +38,7 @@ checkboxes.
 - **Scroll-away header** — host your own SwiftUI view above the document;
   it scrolls with the content and collapses to a pinned top row
 - **TextKit 2** layout for accurate, modern text rendering
-- **Writing Tools** integration on macOS 15.1+ (inline on macOS 27, the popover before)
+- **Writing Tools** integration on macOS 15.1+, inline
 - **Comfortable bottom overscroll** so the caret never pins to the viewport
   edge while typing
 - **Drag-select autoscroll boost** for long documents
