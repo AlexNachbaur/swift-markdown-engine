@@ -9,7 +9,8 @@
 //  moved yet. Drives NSWritingToolsCoordinator with a hand-made WTSession (no
 //  Apple Intelligence), checks every line of both snapshots against where
 //  TextKit has it at that moment, and counts what the text view draws below
-//  and above the edit. Also covers a document switch mid-slide.
+//  and above the edit. Also covers a document switch mid-slide, and the path of
+//  an off-screen suggestion when a proofread selects it.
 //
 //  Skips, not passes, when the machinery is absent or shaped differently from
 //  macOS 27.0.1 (`drivenABI`), or never asks for a snapshot (a CI VM).
@@ -66,6 +67,15 @@ struct WritingToolsCoordinatorPreviewTests {
             .init(readingWidth: nil, header: false, longRewrite: true, fromTop: false, switchMidSlide: true)))
         #expect(report.foreignWrites == 0, "the rewritten document's text was written into the next document's binding")
         #expect(report.switchApplied == true, "the next document never reached the text view")
+    }
+
+    /// Proofreading scrolls the next suggestion into view in the select completion and
+    /// reads its path right there to anchor the explanation panel.
+    @Test(.enabled("no Writing Tools coordinator machinery in this process") { await CoordinatorDrive.cachedLongReport() != nil })
+    func offscreenSuggestionHasItsPathWhenSelected() async throws {
+        guard #available(macOS 15.2, *) else { return }
+        let path = try #require(await CoordinatorDrive.selectFarBelow())
+        #expect(!path.isEmpty, "the selected suggestion had no bounding path when proofreading asked for it")
     }
 
     private func check(_ variant: CoordinatorDrive.Variant, snapshotLines: Bool = true) async throws {
@@ -157,6 +167,9 @@ private enum CoordinatorDrive {
         ("WTContext", "attributedText", "@16@0:8"),
         ("WTTextSuggestion", "initWithOriginalRange:replacement:", "@40@0:8{_NSRange=QQ}16@32"),
         ("NSWritingToolsCoordinator", "proofreadingSession:didReceiveSuggestions:processedRange:inContext:finished:", "v60@0:8@16@24{_NSRange=QQ}32@48B56"),
+        ("NSTextView", "writingToolsCoordinator:requestsContextsForScope:completion:", "v40@0:8@16q24@?32"),
+        ("NSTextView", "writingToolsCoordinator:selectRanges:inContext:completion:", "v48@0:8@16@24@32@?40"),
+        ("NSTextView", "writingToolsCoordinator:requestsBoundingBezierPathsForRange:inContext:completion:", "v56@0:8@16{_NSRange=QQ}24@40@?48"),
     ]
 
     private static var machineryPresent: Bool {
@@ -485,6 +498,107 @@ private enum CoordinatorDrive {
         result.inkBelowAfterwards = inkBelowAfterwards
         result.inkAboveDuringSlide = inkAboveDuringSlide
         return result
+    }
+
+    /// Selects a paragraph far below the viewport the way proofreading steps to its next
+    /// suggestion, and returns the bounding box of the path it then asks for at once.
+    @available(macOS 15.2, *)
+    static func selectFarBelow() async -> NSRect? {
+        guard machineryPresent, installContextHook() else { return nil }
+        _ = NSApplication.shared
+        let window = NSWindow(
+            contentRect: NSRect(x: -30000, y: -30000, width: 900, height: 600),
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        let document = Document(text: markdown(blocksBelow: false))
+        window.contentView = NSHostingView(rootView: Host(document: document, readingWidth: 650, header: true))
+        window.orderFrontRegardless()
+        windows.append(window)
+        defer { window.orderOut(nil) }
+
+        var found: (NSScrollView, NativeTextView)?
+        guard await spin(until: { found = findViews(window.contentView!); return found != nil }, limit: 3),
+              let (_, tv) = found else { return nil }
+        await spin(0.4)
+        // A proofread of paragraphs 40-110 with the viewport at the top.
+        let ns = tv.string as NSString
+        let first = ns.range(of: "Paragraph 40.").location, last = ns.range(of: "Paragraph 111.").location - 2
+        tv.setSelectedRange(NSRange(location: first, length: last - first))
+        window.makeFirstResponder(tv)
+        await spin(0.1)
+
+        let ensureSel = NSSelectorFromString("_ensureWritingToolsCoordinatorCreated")
+        let initSel = NSSelectorFromString("initWithType:textViewDelegate:")
+        typealias Getter = @convention(c) (AnyObject, Selector) -> Unmanaged<AnyObject>?
+        typealias Init = @convention(c) (AnyObject, Selector, Int, AnyObject?) -> Unmanaged<AnyObject>
+        guard let ensureIMP = tv.method(for: ensureSel),
+              let coordinator = unsafeBitCast(ensureIMP, to: Getter.self)(tv, ensureSel)?.takeUnretainedValue() as? NSObject,
+              let sessionCls = NSClassFromString("WTSession") as? NSObject.Type,
+              let allocated = sessionCls.perform(NSSelectorFromString("alloc"))?.takeUnretainedValue(),
+              let initIMP = class_getMethodImplementation(sessionCls, initSel) else { return nil }
+        let session = unsafeBitCast(initIMP, to: Init.self)(allocated, initSel, 1, nil).takeRetainedValue() as! NSObject
+        defer { withExtendedLifetime(session) {} }
+        let box = ContextBox()
+        capturedContexts = []
+        let willBegin = NSSelectorFromString("willBeginWritingToolsSession:requestContexts:")
+        typealias WillBegin = @convention(c) (AnyObject, Selector, AnyObject, @escaping @convention(block) (NSArray?) -> Void) -> Void
+        guard let willBeginIMP = coordinator.method(for: willBegin) else { return nil }
+        unsafeBitCast(willBeginIMP, to: WillBegin.self)(coordinator, willBegin, session) { box.contexts = $0 as? [NSObject] ?? [] }
+        guard await spin(until: { box.contexts != nil }, limit: 1.5),
+              let context = capturedContexts.first as? NSWritingToolsCoordinator.Context,
+              let contextStart = tv.writingToolsContextStarts[context.identifier] else { return nil }
+        let didBegin = NSSelectorFromString("didBeginWritingToolsSession:contexts:")
+        typealias DidBegin = @convention(c) (AnyObject, Selector, AnyObject, NSArray) -> Void
+        guard let didBeginIMP = coordinator.method(for: didBegin) else { return nil }
+        unsafeBitCast(didBeginIMP, to: DidBegin.self)(coordinator, didBegin, session, (box.contexts ?? []) as NSArray)
+        await spin(0.1)
+
+        let target = NSRange(location: ns.range(of: "Paragraph 100.").location - contextStart, length: 14)
+        let select = NSSelectorFromString("writingToolsCoordinator:selectRanges:inContext:completion:")
+        let bounding = NSSelectorFromString("writingToolsCoordinator:requestsBoundingBezierPathsForRange:inContext:completion:")
+        typealias Select = @convention(c) (AnyObject, Selector, AnyObject, NSArray, AnyObject, @escaping @convention(block) () -> Void) -> Void
+        typealias Bounding = @convention(c) (AnyObject, Selector, AnyObject, NSRange, AnyObject, @escaping @convention(block) (NSArray) -> Void) -> Void
+        guard let selectIMP = tv.method(for: select), let boundingIMP = tv.method(for: bounding) else { return nil }
+        var result: NSRect?
+        unsafeBitCast(selectIMP, to: Select.self)(tv, select, coordinator, [NSValue(range: target)] as NSArray, context) {
+            unsafeBitCast(boundingIMP, to: Bounding.self)(tv, bounding, coordinator, target, context) { paths in
+                result = (paths as? [NSBezierPath] ?? []).reduce(NSRect.null) { $0.union($1.bounds) }
+            }
+        }
+        let answered = await spin(until: { result != nil }, limit: 1)
+        let didEnd = NSSelectorFromString("didEndWritingToolsSession:accepted:")
+        typealias DidEnd = @convention(c) (AnyObject, Selector, AnyObject, Bool) -> Void
+        if let didEndIMP = coordinator.method(for: didEnd) {
+            unsafeBitCast(didEndIMP, to: DidEnd.self)(coordinator, didEnd, session, false)
+        }
+        await spin(0.3)
+        guard answered, let result else { return nil }
+        return result.isNull ? .zero : result
+    }
+
+    /// The contexts NSTextView hands the coordinator; select and paths only answer for those.
+    private static var capturedContexts: [AnyObject] = []
+    private static var contextHookInstalled = false
+
+    private static func installContextHook() -> Bool {
+        if contextHookInstalled { return true }
+        let cls: AnyClass = NativeTextView.self
+        let sel = NSSelectorFromString("writingToolsCoordinator:requestsContextsForScope:completion:")
+        guard let method = class_getInstanceMethod(cls, sel),
+              let original = class_getMethodImplementation(cls, sel) else { return false }
+        typealias Completion = @convention(block) (NSArray) -> Void
+        typealias Original = @convention(c) (AnyObject, Selector, AnyObject, Int, Completion) -> Void
+        let call = unsafeBitCast(original, to: Original.self)
+        let block: @convention(block) (AnyObject, AnyObject, Int, @escaping Completion) -> Void = { me, coordinator, scope, done in
+            call(me, sel, coordinator, scope) { contexts in
+                capturedContexts = contexts as [AnyObject]
+                done(contexts)
+            }
+        }
+        class_replaceMethod(cls, sel, imp_implementationWithBlock(block), method_getTypeEncoding(method))
+        contextHookInstalled = true
+        return true
     }
 
     /// Pixels with ink in a fresh draw of `rect` (the text view draws no background here).

@@ -26,10 +26,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Writing Tools use the inline experience again (`writingToolsBehavior =
   .complete`, was `.limited`): a rewrite or proofread morphs in place instead of
   landing in the popover. Code, formulas, links, embeds and tables are excluded
-  from rewrites and proofreading. On macOS 27 three AppKit bugs in that animation are
+  from rewrites and proofreading. On macOS 27 four AppKit bugs in that experience are
   worked around in `NativeTextView`, so the rewritten paragraphs no longer go
   missing and nothing below the edit (text, lists, quotes, code blocks, rules,
-  tables) shows twice while it slides into place. Switching documents while
+  tables) shows twice while it slides into place, and stepping through a
+  proofread to a suggestion that was off screen puts its explanation under the
+  word instead of beside the text view. Stepping through a proofread no longer
+  crashes ("suggestion … already been invalidated by previous edits") or moves
+  suggestions onto other characters: UIFoundation's edit tracker miscounts when
+  a suggestion is re-applied, in a plain NSTextView too, and the engine replaces
+  that one step (`WritingToolsEditTrackerFix`). Switching documents while
   Writing Tools are streaming waits for them to settle instead of crashing
   AppKit, and drops the session's result instead of writing it into the next
   document. Known (#205): AppKit assumes the text view sits at the document

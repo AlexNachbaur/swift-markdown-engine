@@ -317,6 +317,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             // document view's origin, ours doesn't (#205): on 15.1–26 the text below a
             // rewrite dims for the animation, on 27 a later grammar overlay can jump.
             textView.writingToolsBehavior = .complete
+            WritingToolsEditTrackerFix.install()
         }
         // Create TextKit 2 layout bridge
         let bridge = LayoutBridge(textLayoutManager)

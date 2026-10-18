@@ -5,7 +5,7 @@
 //  Created by Luca Chen on 18.10.26.
 //
 //  Inline Writing Tools on macOS 27 run through NSTextView's own, undeclared
-//  NSWritingToolsCoordinator delegate methods, and those have three bugs a plain
+//  NSWritingToolsCoordinator delegate methods, and those have four bugs a plain
 //  NSTextView shows too (measured on 27.0.1). Each override fixes one and then
 //  calls NSTextView's IMP. If an SDK ever declares these selectors, the build
 //  fails here and they become plain overrides.
@@ -62,6 +62,24 @@ extension NativeTextView {
         if animation == .translate { showWritingToolsRemainder() }
         callTextAnimationSuper("writingToolsCoordinator:finishTextAnimation:forRange:inContext:completion:",
                                coordinator, animation, range, context, completion)
+    }
+
+    /// Proofreading anchors a suggestion's explanation to the paths it asks for in
+    /// this completion. NSTextView scrolls the suggestion into view here but lays the
+    /// new viewport out only on the next pass, so a suggestion that was off screen
+    /// came back with an empty path and the panel anchored to the whole text view.
+    @available(macOS 15.2, *)
+    @objc(writingToolsCoordinator:selectRanges:inContext:completion:)
+    func writingToolsCoordinatorSelect(_ coordinator: NSWritingToolsCoordinator, ranges: [NSValue],
+                                       in context: NSWritingToolsCoordinator.Context, completion: @escaping () -> Void) {
+        let selector = NSSelectorFromString("writingToolsCoordinator:selectRanges:inContext:completion:")
+        guard let method = class_getInstanceMethod(NSTextView.self, selector) else { return completion() }
+        typealias Select = @convention(c) (NSTextView, Selector, NSWritingToolsCoordinator, NSArray,
+                                           NSWritingToolsCoordinator.Context, @escaping @convention(block) () -> Void) -> Void
+        unsafeBitCast(method_getImplementation(method), to: Select.self)(self, selector, coordinator, ranges as NSArray, context) { [weak self] in
+            self?.textLayoutManager?.textViewportLayoutController.layoutViewport()
+            completion()
+        }
     }
 
     /// Records where each context starts in the document while the text still
