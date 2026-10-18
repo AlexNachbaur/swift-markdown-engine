@@ -313,9 +313,9 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.onPasteImage = onPasteImage
         if #available(macOS 15.1, *) {
-            // Inline: rewrites morph in place. Known cost on 15.1–26: the text below a
-            // mid-document rewrite dims for the animation, because AppKit's older path
-            // wants the text view to be the documentView (see NativeTextViewContainer).
+            // Inline: rewrites morph in place. AppKit assumes the text view sits at the
+            // document view's origin, ours doesn't (#205): on 15.1–26 the text below a
+            // rewrite dims for the animation, on 27 a later grammar overlay can jump.
             textView.writingToolsBehavior = .complete
         }
         // Create TextKit 2 layout bridge
@@ -484,8 +484,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             // node mismatch and discard the results.
             context.coordinator.cancelDeferredNodeSwitch()
             context.coordinator.isWritingToolsActive = false
-            textView.showWritingToolsRemainder()
-            textView.writingToolsContextStarts = [:]
+            textView.endWritingToolsHide()
         } else if wtActive {
             // Back on the session's document: a deferred switch is void.
             context.coordinator.cancelDeferredNodeSwitch()

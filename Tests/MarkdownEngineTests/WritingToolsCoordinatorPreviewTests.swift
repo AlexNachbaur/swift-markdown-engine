@@ -4,11 +4,12 @@
 //
 //  The doubled words and missing paragraphs of an inline rewrite on macOS 27:
 //  Writing Tools animates from snapshots of the text view (the viewport before
-//  the edit, then the text below the new text), and without the commit in
+//  the edit, then the text below the new text), and without the display pass in
 //  `NativeTextView+WritingTools` they show lines that are not drawn yet or not
 //  moved yet. Drives NSWritingToolsCoordinator with a hand-made WTSession (no
-//  Apple Intelligence) and checks every line of both snapshots against where
-//  TextKit has it at that moment.
+//  Apple Intelligence), checks every line of both snapshots against where
+//  TextKit has it at that moment, and counts what the text view draws below
+//  and above the edit. Also covers a document switch mid-slide.
 //
 //  Skips, not passes, when the machinery is absent or shaped differently from
 //  macOS 27.0.1 (`drivenABI`), or never asks for a snapshot (a CI VM).
@@ -491,9 +492,7 @@ private enum CoordinatorDrive {
         let area = rect.intersection(tv.bounds)
         guard !area.isEmpty, let rep = tv.bitmapImageRepForCachingDisplay(in: area) else { return -1 }
         tv.cacheDisplay(in: area, to: rep)
-        guard let image = rep.cgImage else { return -1 }
-        let pointsTall = area.height
-        return inkBandTops(image, pointsTall: pointsTall).isEmpty ? 0 : inkPixels(image)
+        return rep.cgImage.map(inkPixels) ?? -1
     }
 
     private static func inkPixels(_ image: CGImage) -> Int {

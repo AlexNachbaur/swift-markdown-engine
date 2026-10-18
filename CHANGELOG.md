@@ -25,15 +25,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Writing Tools use the inline experience again (`writingToolsBehavior =
   .complete`, was `.limited`): a rewrite or proofread morphs in place instead of
-  landing in the popover. On macOS 27 three AppKit bugs in that animation are
+  landing in the popover. Code, formulas, links, embeds and tables are excluded
+  from rewrites and proofreading. On macOS 27 three AppKit bugs in that animation are
   worked around in `NativeTextView`, so the rewritten paragraphs no longer go
   missing and nothing below the edit (text, lists, quotes, code blocks, rules,
   tables) shows twice while it slides into place. Switching documents while
   Writing Tools are streaming waits for them to settle instead of crashing
   AppKit, and drops the session's result instead of writing it into the next
-  document. Known: on 15.1–26 the text below a mid-document rewrite still dims for
-  the animation, because AppKit's older path wants the text view to be the
-  scroll view's documentView.
+  document. Known (#205): AppKit assumes the text view sits at the document
+  view's origin, so on 15.1–26 the text below a mid-document rewrite still dims
+  for the animation, and on 27 a grammar suggestion shown after a session can
+  jump for a moment when the text height changes.
 - **Breaking:** `MarkdownEngineCodeBlocks` no longer depends on
   HighlighterSwift. `HighlighterSwiftBridge` is replaced by
   `HighlightJSBridge`, which runs the same highlight.js 11.11.1 build

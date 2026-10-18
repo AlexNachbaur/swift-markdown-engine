@@ -27,11 +27,7 @@ extension NativeTextViewCoordinator {
 
     @available(macOS 15.0, *)
     public func textViewWritingToolsDidEnd(_ textView: NSTextView) {
-        // Backstop: nothing may stay hidden past the session.
-        if let native = textView as? NativeTextView {
-            native.showWritingToolsRemainder()
-            native.writingToolsContextStarts = [:]
-        }
+        (textView as? NativeTextView)?.endWritingToolsHide()
         guard isWritingToolsActive else { return }
         isWritingToolsActive = false
         wtChildWindow = nil
@@ -77,6 +73,22 @@ extension NativeTextViewCoordinator {
         DispatchQueue.main.async { [self] in
             guard bindingFollows(target) else { return }
             text = storage
+        }
+    }
+
+    /// Writing Tools rewrite prose only: code, formulas, links, embeds and tables come
+    /// back as written (the zones spell checking skips too).
+    @available(macOS 15.0, *)
+    public func textView(_ textView: NSTextView,
+                         writingToolsIgnoredRangesInEnclosingRange enclosingRange: NSRange) -> [NSValue] {
+        parsedDocument(for: textView.string).tokens.compactMap { token in
+            switch token.kind {
+            case .codeBlock, .inlineCode, .inlineLatex, .blockLatex, .link, .wikiLink, .imageEmbed, .imageLink, .table:
+                let range = NSIntersectionRange(token.range, enclosingRange)
+                return range.length > 0 ? NSValue(range: range) : nil
+            default:
+                return nil
+            }
         }
     }
 

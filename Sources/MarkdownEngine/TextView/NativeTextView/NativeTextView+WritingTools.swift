@@ -129,8 +129,13 @@ extension NativeTextView {
         redrawLineViews()
     }
 
-    /// Also the backstop at session end and on a document switch: idempotent.
-    func showWritingToolsRemainder() {
+    /// Session end or document switch: nothing may stay hidden, no context survives.
+    func endWritingToolsHide() {
+        showWritingToolsRemainder()
+        writingToolsContextStarts = [:]
+    }
+
+    private func showWritingToolsRemainder() {
         guard let tail = writingToolsHiddenRemainder else { return }
         writingToolsHiddenRemainder = nil
         if !tail.isEmpty { textLayoutManager?.removeRenderingAttribute(.foregroundColor, for: tail) }
