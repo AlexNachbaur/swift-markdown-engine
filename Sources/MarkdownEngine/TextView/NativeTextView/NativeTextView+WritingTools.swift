@@ -5,10 +5,13 @@
 //  Created by Luca Chen on 18.10.26.
 //
 //  Inline Writing Tools on macOS 27 run through NSTextView's own, undeclared
-//  NSWritingToolsCoordinator delegate methods, and those have four bugs a plain
-//  NSTextView shows too (measured on 27.0.1). Each override fixes one and then
-//  calls NSTextView's IMP. If an SDK ever declares these selectors, the build
-//  fails here and they become plain overrides.
+//  NSWritingToolsCoordinator delegate methods, and three of them have bugs a plain
+//  NSTextView shows too (measured on 27.0.1): snapshots taken before a pending
+//  display pass, nothing hidden under `.translate`, and a selection not laid out
+//  yet. The overrides fix those, record the context offsets the hide needs, and
+//  call NSTextView's IMP. The fourth bug is in `WritingToolsEditTrackerFix`. If an
+//  SDK ever declares these selectors, the build fails here and they become plain
+//  overrides.
 //
 
 import AppKit
@@ -24,7 +27,7 @@ extension NativeTextView {
     func writingToolsCoordinatorSnapshot(_ coordinator: NSWritingToolsCoordinator, for rect: NSRect,
                                          in context: NSWritingToolsCoordinator.Context,
                                          completion: @escaping (NSTextPreview?) -> Void) {
-        let selector = NSSelectorFromString("writingToolsCoordinator:requestsPreviewForRect:inContext:completion:")
+        let selector = #selector(writingToolsCoordinatorSnapshot(_:for:in:completion:))
         guard let method = class_getInstanceMethod(NSTextView.self, selector) else { return completion(nil) }
         window?.displayIfNeeded()
         typealias Snapshot = @convention(c) (NSTextView, Selector, NSWritingToolsCoordinator, NSRect,
@@ -50,7 +53,7 @@ extension NativeTextView {
                     .fault("no document offset for a Writing Tools context; text below the edit stays visible")
             }
         }
-        callTextAnimationSuper("writingToolsCoordinator:prepareForTextAnimation:forRange:inContext:completion:",
+        callTextAnimationSuper(#selector(writingToolsCoordinatorPrepare(_:for:range:in:completion:)),
                                coordinator, animation, range, context, completion)
     }
 
@@ -60,7 +63,7 @@ extension NativeTextView {
                                        for animation: NSWritingToolsCoordinator.TextAnimation, range: NSRange,
                                        in context: NSWritingToolsCoordinator.Context, completion: @escaping () -> Void) {
         if animation == .translate { showWritingToolsRemainder() }
-        callTextAnimationSuper("writingToolsCoordinator:finishTextAnimation:forRange:inContext:completion:",
+        callTextAnimationSuper(#selector(writingToolsCoordinatorFinish(_:for:range:in:completion:)),
                                coordinator, animation, range, context, completion)
     }
 
@@ -72,7 +75,7 @@ extension NativeTextView {
     @objc(writingToolsCoordinator:selectRanges:inContext:completion:)
     func writingToolsCoordinatorSelect(_ coordinator: NSWritingToolsCoordinator, ranges: [NSValue],
                                        in context: NSWritingToolsCoordinator.Context, completion: @escaping () -> Void) {
-        let selector = NSSelectorFromString("writingToolsCoordinator:selectRanges:inContext:completion:")
+        let selector = #selector(writingToolsCoordinatorSelect(_:ranges:in:completion:))
         guard let method = class_getInstanceMethod(NSTextView.self, selector) else { return completion() }
         typealias Select = @convention(c) (NSTextView, Selector, NSWritingToolsCoordinator, NSArray,
                                            NSWritingToolsCoordinator.Context, @escaping @convention(block) () -> Void) -> Void
@@ -90,7 +93,7 @@ extension NativeTextView {
     func writingToolsCoordinatorContexts(_ coordinator: NSWritingToolsCoordinator,
                                          for scope: NSWritingToolsCoordinator.ContextScope,
                                          completion: @escaping ([NSWritingToolsCoordinator.Context]) -> Void) {
-        let selector = NSSelectorFromString("writingToolsCoordinator:requestsContextsForScope:completion:")
+        let selector = #selector(writingToolsCoordinatorContexts(_:for:completion:))
         guard let method = class_getInstanceMethod(NSTextView.self, selector) else { return completion([]) }
         typealias Contexts = @convention(c) (NSTextView, Selector, NSWritingToolsCoordinator, NSWritingToolsCoordinator.ContextScope,
                                              @escaping @convention(block) ([NSWritingToolsCoordinator.Context]) -> Void) -> Void
@@ -120,10 +123,9 @@ extension NativeTextView {
     }
 
     @available(macOS 15.2, *)
-    private func callTextAnimationSuper(_ name: String, _ coordinator: NSWritingToolsCoordinator,
+    private func callTextAnimationSuper(_ selector: Selector, _ coordinator: NSWritingToolsCoordinator,
                                         _ animation: NSWritingToolsCoordinator.TextAnimation, _ range: NSRange,
                                         _ context: NSWritingToolsCoordinator.Context, _ completion: @escaping () -> Void) {
-        let selector = NSSelectorFromString(name)
         guard let method = class_getInstanceMethod(NSTextView.self, selector) else { return completion() }
         typealias Animation = @convention(c) (NSTextView, Selector, NSWritingToolsCoordinator, NSWritingToolsCoordinator.TextAnimation,
                                               NSRange, NSWritingToolsCoordinator.Context, @escaping @convention(block) () -> Void) -> Void

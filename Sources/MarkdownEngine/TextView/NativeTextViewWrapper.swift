@@ -479,14 +479,14 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
                 }
                 return
             }
-            // User switched files while Writing Tools was active — discard the
-            // WT session so it doesn't overwrite the wrong node.
-            // Keep wtStartDocumentId so textViewWritingToolsDidEnd can detect the
-            // node mismatch and discard the results.
+            // Any other state ends here: left running, the session's end replays its
+            // ranges into the next document (NSRangeException on 27.0.1), and its
+            // result is dropped because the coordinator no longer counts it as active.
             context.coordinator.cancelDeferredNodeSwitch()
-            context.coordinator.isWritingToolsActive = false
+            context.coordinator.resetWritingToolsSession()
+            if #available(macOS 15.2, *) { textView.writingToolsCoordinator?.stopWritingTools() }
             textView.endWritingToolsHide()
-        } else if wtActive {
+        } else if context.coordinator.isWritingToolsActive {
             // Back on the session's document: a deferred switch is void.
             context.coordinator.cancelDeferredNodeSwitch()
             // WT active on the same node — don't interfere with the session.

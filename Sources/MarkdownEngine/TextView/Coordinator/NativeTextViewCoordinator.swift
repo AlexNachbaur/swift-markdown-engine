@@ -106,14 +106,12 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     var lastSyncedText: String
     var isProgrammaticEdit: Bool = false
     var isWritingToolsActive: Bool = false
-    var wtStartDocumentId: String?
     weak var wtChildWindow: NSWindow?
     var wtInitialChildOrigin: CGPoint?
     var wtInitialSelectionRange: NSRange?
     enum WTMode { case unknown, proofread, rewrite }
     var wtDetectedMode: WTMode = .unknown
     var wtUndoObserverTokens: [NSObjectProtocol] = []
-    var wtUndoneDuringSession: Bool = false
     var wtPostUndoSnapshot: String?
     /// A document switch waiting for a streaming Writing Tools session to settle.
     var deferredNodeSwitch: (() -> Void)?

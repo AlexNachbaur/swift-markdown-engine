@@ -48,7 +48,13 @@ struct WritingToolsCoordinatorPreviewTests {
     /// read as document offsets they hid text above the edit.
     @Test(.enabled("no Writing Tools coordinator machinery in this process") { await CoordinatorDrive.cachedLongReport() != nil })
     func proofreadMidDocumentHidesOnlyTheTextBelow() async throws {
-        try await check(.init(readingWidth: 650, header: true, longRewrite: false, fromTop: false, proofread: true))
+        let variant = CoordinatorDrive.Variant(readingWidth: 650, header: true, longRewrite: false, fromTop: false, proofread: true)
+        var report = await CoordinatorDrive.run(variant)
+        if report == nil { report = await CoordinatorDrive.run(variant) }
+        let proofread = try #require(report)
+        check(proofread)
+        // The proofread path skips textDidChange's reset; a leftover swallows the next keystroke's mutation.
+        #expect(proofread.pendingEditsAfterEnd == 0)
     }
 
     /// Bullets, tasks, quote bars, code backgrounds, rules and tables are painted by
@@ -76,6 +82,32 @@ struct WritingToolsCoordinatorPreviewTests {
         guard #available(macOS 15.2, *) else { return }
         let path = try #require(await CoordinatorDrive.selectFarBelow())
         #expect(!path.isEmpty, "the selected suggestion had no bounding path when proofreading asked for it")
+    }
+
+    /// A switch while a proofread's suggestion shows: ending the session afterwards
+    /// replayed it with this document's ranges into the next one (NSRangeException),
+    /// and until then the next document took no updates.
+    @Test(.enabled("no Writing Tools coordinator machinery in this process") { await CoordinatorDrive.cachedLongReport() != nil },
+          arguments: [true, false])
+    func switchWhileAProofreadRestsLeavesTheNextDocumentAlone(accepted: Bool) async throws {
+        guard #available(macOS 15.2, *) else { return }
+        let end = try #require(await CoordinatorDrive.switchWhileProofreadRests(accepted: accepted))
+        #expect(end.stepApplied, "the next document never reached the text view")
+        #expect(end.outsideEditArrived, "an edit to the next document never reached the text view")
+        #expect(end.text == end.expected)
+        #expect(end.binding == end.expected)
+        #expect(end.foreignWrites == 0)
+    }
+
+    /// ⌘Z during a rewrite: AppKit's own session end then threw on the undone text.
+    @Test(.enabled("no Writing Tools coordinator machinery in this process") { await CoordinatorDrive.cachedLongReport() != nil },
+          arguments: [true, false])
+    func undoDuringARewriteEndsOnTheUndoneText(accepted: Bool) async throws {
+        guard #available(macOS 15.2, *) else { return }
+        let end = try #require(await CoordinatorDrive.undoDuringRewrite(accepted: accepted))
+        #expect(end.stepApplied, "⌘Z did not restore the text")
+        #expect(end.text == end.expected)
+        #expect(end.binding == end.expected)
     }
 
     private func check(_ variant: CoordinatorDrive.Variant, snapshotLines: Bool = true) async throws {
@@ -136,6 +168,8 @@ private enum CoordinatorDrive {
         /// Writes of anything but the next document's text into its binding.
         var foreignWrites = 0
         var switchApplied: Bool?
+        /// Edits the coordinator still counts as pending once the session ended.
+        var pendingEditsAfterEnd = -1
         var description: String { "bands \(bands) expected \(expectedLineTops) inkOffset \(String(describing: inkOffset))" }
     }
 
@@ -272,8 +306,10 @@ private enum CoordinatorDrive {
         static let next = (1...30).map { "Other note \($0). Different content." }.joined(separator: "\n\n")
         @Published var id = "A"
         @Published var text: String {
-            didSet { if id != "A" && text != Self.next { foreignWrites += 1 } }
+            didSet { if id != "A" && text != Self.next && text != outsideEdit { foreignWrites += 1 } }
         }
+        /// An edit to the next document made outside the editor, not a foreign write.
+        var outsideEdit: String?
         var foreignWrites = 0
         init(text: String) { self.text = text }
     }
@@ -346,132 +382,189 @@ private enum CoordinatorDrive {
         var contexts: [NSObject]?
     }
 
-    /// `nil` = the machinery is absent or never asked for the remainder snapshot.
-    static func run(_ variant: Variant) async -> Report? {
-        guard machineryPresent, installHook() else { return nil }
+    /// The editor in a window, hosted the way Nodes hosts it.
+    private struct Stage {
+        let window: NSWindow
+        let document: Document
+        let scrollView: NSScrollView
+        let textView: NativeTextView
+    }
+
+    private static func stage(readingWidth: CGFloat?, header: Bool, blocksBelow: Bool = false) async -> Stage? {
         _ = NSApplication.shared
         let window = NSWindow(
             contentRect: NSRect(x: -30000, y: -30000, width: 900, height: 600),
             styleMask: [.borderless], backing: .buffered, defer: false
         )
         window.isReleasedWhenClosed = false
-        let document = Document(text: markdown(blocksBelow: variant.blocksBelow))
-        window.contentView = NSHostingView(rootView: Host(document: document, readingWidth: variant.readingWidth, header: variant.header))
+        let document = Document(text: markdown(blocksBelow: blocksBelow))
+        window.contentView = NSHostingView(rootView: Host(document: document, readingWidth: readingWidth, header: header))
         window.orderFrontRegardless()
         windows.append(window)
-        defer { window.orderOut(nil) }
-
         var found: (NSScrollView, NativeTextView)?
         guard await spin(until: { found = findViews(window.contentView!); return found != nil }, limit: 3),
-              let (sv, tv) = found, let tlm = tv.textLayoutManager else { return nil }
+              let (sv, tv) = found else {
+            window.orderOut(nil)
+            return nil
+        }
         await spin(0.4)
-        recorder.snapshots[ObjectIdentifier(tv)] = []
+        return Stage(window: window, document: document, scrollView: sv, textView: tv)
+    }
 
-        // Select paragraph 40 and put it near the top (plenty of text below it), or the first three.
+    /// Paragraph 40 (or the first three) selected and scrolled near the top, with plenty of text below.
+    private static func selectEditTarget(in stage: Stage, fromTop: Bool) async -> NSRange? {
+        let tv = stage.textView, sv = stage.scrollView
+        guard let tlm = tv.textLayoutManager else { return nil }
         let ns = tv.string as NSString
         let paragraph = ns.paragraphRange(for: NSRange(location: ns.range(of: "Paragraph 40.").location, length: 0))
-        let selection = variant.fromTop
+        let selection = fromTop
             ? NSRange(location: 0, length: ns.range(of: "Paragraph 4.").location - 1)
             : NSRange(location: paragraph.location, length: paragraph.length - 1)
         tv.setSelectedRange(selection)
         tlm.ensureLayout(for: tlm.documentRange)
         guard let start = tlm.location(tlm.documentRange.location, offsetBy: selection.location),
               let fragment = tlm.textLayoutFragment(for: start) else { return nil }
-        let top = sv.documentView!.convert(NSPoint(x: 0, y: fragment.layoutFragmentFrame.minY + tv.textContainerOrigin.y), from: tv).y
+        let top = tv.rectInClipView(fragment.layoutFragmentFrame.offsetBy(dx: 0, dy: tv.textContainerOrigin.y)).minY
         sv.contentView.scroll(to: NSPoint(x: 0, y: max(0, top - 100)))
         sv.reflectScrolledClipView(sv.contentView)
-        window.makeFirstResponder(tv)
-        window.displayIfNeeded()
+        stage.window.makeFirstResponder(tv)
+        stage.window.displayIfNeeded()
         await spin(0.1)
+        return selection
+    }
 
+    /// The private calls the Writing Tools service makes on a text view's coordinator.
+    private struct Session {
+        let coordinator: NSObject
+        let session: NSObject
+        let contexts: [NSObject]
+
+        var contextRange: NSRange? { (contexts.first?.value(forKey: "range") as? NSValue)?.rangeValue }
+
+        func didBegin() {
+            let sel = NSSelectorFromString("didBeginWritingToolsSession:contexts:")
+            typealias DidBegin = @convention(c) (AnyObject, Selector, AnyObject, NSArray) -> Void
+            guard let imp = coordinator.method(for: sel) else { return }
+            unsafeBitCast(imp, to: DidBegin.self)(coordinator, sel, session, contexts as NSArray)
+        }
+
+        func action(_ action: Int) {
+            let sel = NSSelectorFromString("writingToolsSession:didReceiveAction:")
+            typealias Action = @convention(c) (AnyObject, Selector, AnyObject, Int) -> Void
+            guard let imp = coordinator.method(for: sel) else { return }
+            unsafeBitCast(imp, to: Action.self)(coordinator, sel, session, action)
+        }
+
+        func deliver(_ text: NSAttributedString, replacing range: NSRange) {
+            let sel = NSSelectorFromString("compositionSession:didReceiveText:replacementRange:inContext:finished:")
+            typealias Deliver = @convention(c) (AnyObject, Selector, AnyObject, NSAttributedString, NSRange, AnyObject, Bool) -> Void
+            guard let imp = coordinator.method(for: sel), let context = contexts.first else { return }
+            unsafeBitCast(imp, to: Deliver.self)(coordinator, sel, session, text, range, context, true)
+        }
+
+        /// One suggestion replacing `word` in the context's first `processed` characters.
+        func suggest(_ replacement: String, for word: String, processed: NSRange) -> Bool {
+            let text = (contexts.first?.value(forKey: "attributedText") as? NSAttributedString)?.string as NSString? ?? ""
+            guard processed.location <= text.length else { return false }
+            let found = text.range(of: word, options: [], range: NSRange(
+                location: processed.location, length: min(processed.length, text.length - processed.location)))
+            let initSel = NSSelectorFromString("initWithOriginalRange:replacement:")
+            typealias SuggestionInit = @convention(c) (AnyObject, Selector, NSRange, NSString) -> Unmanaged<AnyObject>
+            let sel = NSSelectorFromString("proofreadingSession:didReceiveSuggestions:processedRange:inContext:finished:")
+            typealias Deliver = @convention(c) (AnyObject, Selector, AnyObject, NSArray, NSRange, AnyObject, Bool) -> Void
+            guard found.location != NSNotFound, let cls = NSClassFromString("WTTextSuggestion") as? NSObject.Type,
+                  let allocated = cls.perform(NSSelectorFromString("alloc"))?.takeUnretainedValue(),
+                  let initIMP = class_getMethodImplementation(cls, initSel),
+                  let imp = coordinator.method(for: sel), let context = contexts.first else { return false }
+            let suggestion = unsafeBitCast(initIMP, to: SuggestionInit.self)(allocated, initSel, found, replacement as NSString)
+                .takeRetainedValue()
+            unsafeBitCast(imp, to: Deliver.self)(coordinator, sel, session, [suggestion] as NSArray, processed, context, true)
+            return true
+        }
+
+        func end(accepted: Bool) {
+            let sel = NSSelectorFromString("didEndWritingToolsSession:accepted:")
+            typealias DidEnd = @convention(c) (AnyObject, Selector, AnyObject, Bool) -> Void
+            guard let imp = coordinator.method(for: sel) else { return }
+            unsafeBitCast(imp, to: DidEnd.self)(coordinator, sel, session, accepted)
+        }
+    }
+
+    /// Starts a session on `tv` and waits for its contexts. Type 1 = proofread,
+    /// 2 = composition; composition type 10 = the animated inline replace.
+    private static func begin(on tv: NativeTextView, proofread: Bool) async -> Session? {
         let ensureSel = NSSelectorFromString("_ensureWritingToolsCoordinatorCreated")
         let initSel = NSSelectorFromString("initWithType:textViewDelegate:")
+        let willBegin = NSSelectorFromString("willBeginWritingToolsSession:requestContexts:")
         typealias Getter = @convention(c) (AnyObject, Selector) -> Unmanaged<AnyObject>?
         typealias Init = @convention(c) (AnyObject, Selector, Int, AnyObject?) -> Unmanaged<AnyObject>
+        typealias WillBegin = @convention(c) (AnyObject, Selector, AnyObject, @escaping @convention(block) (NSArray?) -> Void) -> Void
         guard let ensureIMP = tv.method(for: ensureSel),
               let coordinator = unsafeBitCast(ensureIMP, to: Getter.self)(tv, ensureSel)?.takeUnretainedValue() as? NSObject,
               let sessionCls = NSClassFromString("WTSession") as? NSObject.Type,
               let allocated = sessionCls.perform(NSSelectorFromString("alloc"))?.takeUnretainedValue(),
-              let initIMP = class_getMethodImplementation(sessionCls, initSel) else { return nil }
-        // Type 1 = proofread, 2 = composition; composition type 10 = the animated inline replace.
-        let session = unsafeBitCast(initIMP, to: Init.self)(allocated, initSel, variant.proofread ? 1 : 2, nil).takeRetainedValue() as! NSObject
-        if !variant.proofread { session.setValue(10, forKey: "compositionSessionType") }
-
+              let initIMP = class_getMethodImplementation(sessionCls, initSel),
+              let willBeginIMP = coordinator.method(for: willBegin) else { return nil }
+        let session = unsafeBitCast(initIMP, to: Init.self)(allocated, initSel, proofread ? 1 : 2, nil).takeRetainedValue() as! NSObject
+        if !proofread { session.setValue(10, forKey: "compositionSessionType") }
         let box = ContextBox()
-        let willBegin = NSSelectorFromString("willBeginWritingToolsSession:requestContexts:")
-        typealias WillBegin = @convention(c) (AnyObject, Selector, AnyObject, @escaping @convention(block) (NSArray?) -> Void) -> Void
-        guard let willBeginIMP = coordinator.method(for: willBegin) else { return nil }
-        unsafeBitCast(willBeginIMP, to: WillBegin.self)(coordinator, willBegin, session) { contexts in
-            box.contexts = contexts as? [NSObject] ?? []
-        }
-        guard await spin(until: { box.contexts != nil }, limit: 1.5), let context = box.contexts?.first else { return nil }
+        unsafeBitCast(willBeginIMP, to: WillBegin.self)(coordinator, willBegin, session) { box.contexts = $0 as? [NSObject] ?? [] }
+        guard await spin(until: { box.contexts != nil }, limit: 1.5), let contexts = box.contexts, !contexts.isEmpty else { return nil }
+        return Session(coordinator: coordinator, session: session, contexts: contexts)
+    }
 
-        let didBegin = NSSelectorFromString("didBeginWritingToolsSession:contexts:")
-        typealias DidBegin = @convention(c) (AnyObject, Selector, AnyObject, NSArray) -> Void
-        guard let didBeginIMP = coordinator.method(for: didBegin) else { return nil }
-        unsafeBitCast(didBeginIMP, to: DidBegin.self)(coordinator, didBegin, session, (box.contexts ?? []) as NSArray)
-        let contextRange = (context.value(forKey: "range") as? NSValue)?.rangeValue ?? selection
+    private static func writingToolsActive(_ tv: NSTextView) -> Bool {
+        if #available(macOS 15.0, *) { return tv.isWritingToolsActive }
+        return false
+    }
+
+    /// `nil` = the machinery is absent or never asked for the remainder snapshot.
+    static func run(_ variant: Variant) async -> Report? {
+        guard machineryPresent, installHook(),
+              let stage = await stage(readingWidth: variant.readingWidth, header: variant.header,
+                                      blocksBelow: variant.blocksBelow) else { return nil }
+        defer { stage.window.orderOut(nil) }
+        let tv = stage.textView
+        let key = ObjectIdentifier(tv)
+        recorder.snapshots[key] = []
+        guard let selection = await selectEditTarget(in: stage, fromTop: variant.fromTop),
+              let wt = await begin(on: tv, proofread: variant.proofread) else { return nil }
+        defer { withExtendedLifetime(wt) {} }
+        wt.didBegin()
+        let contextRange = wt.contextRange ?? selection
         await spin(0.1)
 
         // Action 3 ("pondering") is where the coordinator installs its effect view.
-        let action = NSSelectorFromString("writingToolsSession:didReceiveAction:")
-        typealias Action = @convention(c) (AnyObject, Selector, AnyObject, Int) -> Void
-        guard let actionIMP = coordinator.method(for: action) else { return nil }
-        unsafeBitCast(actionIMP, to: Action.self)(coordinator, action, session, 3)
+        wt.action(3)
         await spin(variant.fromTop ? 1.6 : 0.6)
 
-        // Deliver with the paragraph's own attributes, as Writing Tools does.
-        let body = variant.longRewrite
-            ? (0..<5).map { "Rewritten sentence \($0) that is longer than the original paragraph was." }.joined(separator: " ")
-            : "A much shorter rewrite."
-        let attributes = tv.textStorage?.attributes(at: selection.location, effectiveRange: nil) ?? [:]
         if variant.proofread {
-            // One suggestion that wraps the paragraph onto another line.
-            let contextText = (context.value(forKey: "attributedText") as? NSAttributedString)?.string as NSString? ?? ""
-            let word = contextText.range(of: "quick", options: [], range: NSRange(
-                location: contextRange.location, length: min(contextRange.length, contextText.length - contextRange.location)))
-            let suggestionInit = NSSelectorFromString("initWithOriginalRange:replacement:")
-            typealias SuggestionInit = @convention(c) (AnyObject, Selector, NSRange, NSString) -> Unmanaged<AnyObject>
-            guard word.location != NSNotFound, let suggestionCls = NSClassFromString("WTTextSuggestion") as? NSObject.Type,
-                  let allocatedSuggestion = suggestionCls.perform(NSSelectorFromString("alloc"))?.takeUnretainedValue(),
-                  let suggestionIMP = class_getMethodImplementation(suggestionCls, suggestionInit) else { return nil }
-            let suggestion = unsafeBitCast(suggestionIMP, to: SuggestionInit.self)(
-                allocatedSuggestion, suggestionInit, word, "remarkably and unbelievably quick, faster than anything seen before" as NSString
-            ).takeRetainedValue()
-            let deliver = NSSelectorFromString("proofreadingSession:didReceiveSuggestions:processedRange:inContext:finished:")
-            typealias Deliver = @convention(c) (AnyObject, Selector, AnyObject, NSArray, NSRange, AnyObject, Bool) -> Void
-            guard let deliverIMP = coordinator.method(for: deliver) else { return nil }
-            unsafeBitCast(deliverIMP, to: Deliver.self)(coordinator, deliver, session, [suggestion] as NSArray, contextRange, context, true)
+            // One short suggestion, so the engine takes its proofread branch.
+            guard wt.suggest("fast", for: "quick", processed: contextRange) else { return nil }
         } else {
-            let deliver = NSSelectorFromString("compositionSession:didReceiveText:replacementRange:inContext:finished:")
-            typealias Deliver = @convention(c) (AnyObject, Selector, AnyObject, NSAttributedString, NSRange, AnyObject, Bool) -> Void
-            guard let deliverIMP = coordinator.method(for: deliver) else { return nil }
-            unsafeBitCast(deliverIMP, to: Deliver.self)(
-                coordinator, deliver, session, NSAttributedString(string: body, attributes: attributes), contextRange, context, true
-            )
+            // Deliver with the paragraph's own attributes, as Writing Tools does.
+            let body = variant.longRewrite
+                ? (0..<5).map { "Rewritten sentence \($0) that is longer than the original paragraph was." }.joined(separator: " ")
+                : "A much shorter rewrite."
+            let attributes = tv.textStorage?.attributes(at: selection.location, effectiveRange: nil) ?? [:]
+            wt.deliver(NSAttributedString(string: body, attributes: attributes), replacing: contextRange)
         }
 
         // The pre-edit viewport snapshot, then the remainder below the new text.
-        let key = ObjectIdentifier(tv)
         _ = await spin(until: { (recorder.snapshots[key] ?? []).filter { $0.bands != nil }.count >= 2 }, limit: 1.5)
         let snapshots = recorder.snapshots[key] ?? []
-        let didEnd = NSSelectorFromString("didEndWritingToolsSession:accepted:")
-        typealias DidEnd = @convention(c) (AnyObject, Selector, AnyObject, Bool) -> Void
 
         if variant.switchMidSlide {
             await spin(0.5)
-            document.text = Document.next
-            document.id = "B"
+            stage.document.text = Document.next
+            stage.document.id = "B"
             await spin(0.05)
             // The real service ends the session when the engine stops it; this one is told to.
-            if let didEndIMP = coordinator.method(for: didEnd) {
-                unsafeBitCast(didEndIMP, to: DidEnd.self)(coordinator, didEnd, session, false)
-            }
+            wt.end(accepted: false)
             var result = Report()
             result.switchApplied = await spin(until: { tv.string.hasPrefix("Other note") }, limit: 4)
             await spin(0.3)
-            result.foreignWrites = document.foreignWrites
-            withExtendedLifetime(session) {}
+            result.foreignWrites = stage.document.foreignWrites
             return result
         }
 
@@ -482,13 +575,11 @@ private enum CoordinatorDrive {
         let inkBelowDuringSlide = inkCount(tv, in: below)
         // The last line of the paragraph above the edit (none when rewriting from the top).
         let inkAboveDuringSlide = variant.fromTop ? -1 : inkCount(tv, in: lineAbove(selection, in: tv))
-        await spin(1.5)
+        _ = await spin(until: { inkCount(tv, in: below) > 0 }, limit: 2)
         let inkBelowAfterwards = inkCount(tv, in: below)
-        if let didEndIMP = coordinator.method(for: didEnd) {
-            unsafeBitCast(didEndIMP, to: DidEnd.self)(coordinator, didEnd, session, true)
-        }
-        await spin(1.0)
-        withExtendedLifetime(session) {}
+        wt.end(accepted: true)
+        _ = await spin(until: { !writingToolsActive(tv) }, limit: 1)
+        await spin(0.1)
 
         guard snapshots.count >= 2, let before = snapshots.first, let beforeBands = before.bands,
               let remainder = snapshots.last, let bands = remainder.bands else { return nil }
@@ -497,6 +588,82 @@ private enum CoordinatorDrive {
         result.inkBelowDuringSlide = inkBelowDuringSlide
         result.inkBelowAfterwards = inkBelowAfterwards
         result.inkAboveDuringSlide = inkAboveDuringSlide
+        result.pendingEditsAfterEnd = (tv.delegate as? NativeTextViewCoordinator)?.pendingEditCount ?? -1
+        return result
+    }
+
+    /// What the text view and the binding hold once a session has ended.
+    struct SessionEnd {
+        /// The step before the end took effect: the switch, or the undo.
+        var stepApplied = false
+        /// An edit to the next document from outside reached the text view.
+        var outsideEditArrived = false
+        var expected = ""
+        var text = ""
+        var binding = ""
+        var foreignWrites = 0
+    }
+
+    /// A proofread whose suggestion shows, then a switch to the next document, an edit
+    /// to it from outside, and the end of the session.
+    @available(macOS 15.2, *)
+    static func switchWhileProofreadRests(accepted: Bool) async -> SessionEnd? {
+        guard machineryPresent, let stage = await stage(readingWidth: 650, header: true) else { return nil }
+        defer { stage.window.orderOut(nil) }
+        let tv = stage.textView
+        guard let selection = await selectEditTarget(in: stage, fromTop: false),
+              let wt = await begin(on: tv, proofread: true) else { return nil }
+        defer { withExtendedLifetime(wt) {} }
+        wt.didBegin()
+        wt.action(3)
+        await spin(0.6)
+        guard wt.suggest("fast", for: "quick", processed: wt.contextRange ?? selection),
+              await spin(until: { tv.writingToolsCoordinator?.state == .interactiveResting }, limit: 3) else { return nil }
+
+        var result = SessionEnd()
+        stage.document.text = Document.next
+        stage.document.id = "B"
+        result.stepApplied = await spin(until: { tv.string == Document.next }, limit: 4)
+        let edited = Document.next + "\n\nAn edit from outside."
+        stage.document.outsideEdit = edited
+        stage.document.text = edited
+        result.outsideEditArrived = await spin(until: { tv.string == edited }, limit: 1)
+        // The real service ends the session when the engine stops it; this one is told to.
+        wt.end(accepted: accepted)
+        await spin(0.5)
+        result.expected = edited
+        result.text = tv.string
+        result.binding = stage.document.text
+        result.foreignWrites = stage.document.foreignWrites
+        return result
+    }
+
+    /// A rewrite at rest, ⌘Z, and the end of the session.
+    @available(macOS 15.2, *)
+    static func undoDuringRewrite(accepted: Bool) async -> SessionEnd? {
+        guard machineryPresent, let stage = await stage(readingWidth: 650, header: true) else { return nil }
+        defer { stage.window.orderOut(nil) }
+        let tv = stage.textView
+        let original = tv.string
+        guard let selection = await selectEditTarget(in: stage, fromTop: false),
+              let wt = await begin(on: tv, proofread: false) else { return nil }
+        defer { withExtendedLifetime(wt) {} }
+        wt.didBegin()
+        wt.action(3)
+        await spin(0.6)
+        let attributes = tv.textStorage?.attributes(at: selection.location, effectiveRange: nil) ?? [:]
+        wt.deliver(NSAttributedString(string: "A much shorter rewrite.", attributes: attributes),
+                   replacing: wt.contextRange ?? selection)
+        guard await spin(until: { tv.writingToolsCoordinator?.state == .interactiveResting }, limit: 3) else { return nil }
+
+        var result = SessionEnd()
+        tv.undoManager?.undo()
+        result.stepApplied = await spin(until: { tv.string == original }, limit: 1)
+        wt.end(accepted: accepted)
+        _ = await spin(until: { stage.document.text == original }, limit: 1)
+        result.expected = original
+        result.text = tv.string
+        result.binding = stage.document.text
         return result
     }
 
@@ -504,54 +671,23 @@ private enum CoordinatorDrive {
     /// suggestion, and returns the bounding box of the path it then asks for at once.
     @available(macOS 15.2, *)
     static func selectFarBelow() async -> NSRect? {
-        guard machineryPresent, installContextHook() else { return nil }
-        _ = NSApplication.shared
-        let window = NSWindow(
-            contentRect: NSRect(x: -30000, y: -30000, width: 900, height: 600),
-            styleMask: [.borderless], backing: .buffered, defer: false
-        )
-        window.isReleasedWhenClosed = false
-        let document = Document(text: markdown(blocksBelow: false))
-        window.contentView = NSHostingView(rootView: Host(document: document, readingWidth: 650, header: true))
-        window.orderFrontRegardless()
-        windows.append(window)
-        defer { window.orderOut(nil) }
-
-        var found: (NSScrollView, NativeTextView)?
-        guard await spin(until: { found = findViews(window.contentView!); return found != nil }, limit: 3),
-              let (_, tv) = found else { return nil }
-        await spin(0.4)
+        guard machineryPresent, installContextHook(),
+              let stage = await stage(readingWidth: 650, header: true) else { return nil }
+        defer { stage.window.orderOut(nil) }
+        let tv = stage.textView
         // A proofread of paragraphs 40-110 with the viewport at the top.
         let ns = tv.string as NSString
         let first = ns.range(of: "Paragraph 40.").location, last = ns.range(of: "Paragraph 111.").location - 2
         tv.setSelectedRange(NSRange(location: first, length: last - first))
-        window.makeFirstResponder(tv)
+        stage.window.makeFirstResponder(tv)
         await spin(0.1)
 
-        let ensureSel = NSSelectorFromString("_ensureWritingToolsCoordinatorCreated")
-        let initSel = NSSelectorFromString("initWithType:textViewDelegate:")
-        typealias Getter = @convention(c) (AnyObject, Selector) -> Unmanaged<AnyObject>?
-        typealias Init = @convention(c) (AnyObject, Selector, Int, AnyObject?) -> Unmanaged<AnyObject>
-        guard let ensureIMP = tv.method(for: ensureSel),
-              let coordinator = unsafeBitCast(ensureIMP, to: Getter.self)(tv, ensureSel)?.takeUnretainedValue() as? NSObject,
-              let sessionCls = NSClassFromString("WTSession") as? NSObject.Type,
-              let allocated = sessionCls.perform(NSSelectorFromString("alloc"))?.takeUnretainedValue(),
-              let initIMP = class_getMethodImplementation(sessionCls, initSel) else { return nil }
-        let session = unsafeBitCast(initIMP, to: Init.self)(allocated, initSel, 1, nil).takeRetainedValue() as! NSObject
-        defer { withExtendedLifetime(session) {} }
-        let box = ContextBox()
         capturedContexts = []
-        let willBegin = NSSelectorFromString("willBeginWritingToolsSession:requestContexts:")
-        typealias WillBegin = @convention(c) (AnyObject, Selector, AnyObject, @escaping @convention(block) (NSArray?) -> Void) -> Void
-        guard let willBeginIMP = coordinator.method(for: willBegin) else { return nil }
-        unsafeBitCast(willBeginIMP, to: WillBegin.self)(coordinator, willBegin, session) { box.contexts = $0 as? [NSObject] ?? [] }
-        guard await spin(until: { box.contexts != nil }, limit: 1.5),
-              let context = capturedContexts.first as? NSWritingToolsCoordinator.Context,
+        guard let wt = await begin(on: tv, proofread: true) else { return nil }
+        defer { withExtendedLifetime(wt) {} }
+        guard let context = capturedContexts.first as? NSWritingToolsCoordinator.Context,
               let contextStart = tv.writingToolsContextStarts[context.identifier] else { return nil }
-        let didBegin = NSSelectorFromString("didBeginWritingToolsSession:contexts:")
-        typealias DidBegin = @convention(c) (AnyObject, Selector, AnyObject, NSArray) -> Void
-        guard let didBeginIMP = coordinator.method(for: didBegin) else { return nil }
-        unsafeBitCast(didBeginIMP, to: DidBegin.self)(coordinator, didBegin, session, (box.contexts ?? []) as NSArray)
+        wt.didBegin()
         await spin(0.1)
 
         let target = NSRange(location: ns.range(of: "Paragraph 100.").location - contextStart, length: 14)
@@ -561,17 +697,13 @@ private enum CoordinatorDrive {
         typealias Bounding = @convention(c) (AnyObject, Selector, AnyObject, NSRange, AnyObject, @escaping @convention(block) (NSArray) -> Void) -> Void
         guard let selectIMP = tv.method(for: select), let boundingIMP = tv.method(for: bounding) else { return nil }
         var result: NSRect?
-        unsafeBitCast(selectIMP, to: Select.self)(tv, select, coordinator, [NSValue(range: target)] as NSArray, context) {
-            unsafeBitCast(boundingIMP, to: Bounding.self)(tv, bounding, coordinator, target, context) { paths in
+        unsafeBitCast(selectIMP, to: Select.self)(tv, select, wt.coordinator, [NSValue(range: target)] as NSArray, context) {
+            unsafeBitCast(boundingIMP, to: Bounding.self)(tv, bounding, wt.coordinator, target, context) { paths in
                 result = (paths as? [NSBezierPath] ?? []).reduce(NSRect.null) { $0.union($1.bounds) }
             }
         }
         let answered = await spin(until: { result != nil }, limit: 1)
-        let didEnd = NSSelectorFromString("didEndWritingToolsSession:accepted:")
-        typealias DidEnd = @convention(c) (AnyObject, Selector, AnyObject, Bool) -> Void
-        if let didEndIMP = coordinator.method(for: didEnd) {
-            unsafeBitCast(didEndIMP, to: DidEnd.self)(coordinator, didEnd, session, false)
-        }
+        wt.end(accepted: false)
         await spin(0.3)
         guard answered, let result else { return nil }
         return result.isNull ? .zero : result

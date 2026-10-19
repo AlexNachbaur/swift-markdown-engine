@@ -65,6 +65,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Switching documents drops AppKit's blue autocorrection underline; it stood over the incoming document, and its range moved into the new text.
 - Smart paste keeps tables, lists and headings that arrive wrapped in elements the converter doesn't know (Gemini's `<response-element>`/`<table-block>` web components, `<section>`, a Google Docs `<b>` wrapper); they used to collapse into one line of text.
+- Writing Tools on macOS 27: switching documents while a proofread's suggestions show, or pressing ⌘Z during a rewrite, no longer crashes when the session ends. AppKit's own end replayed the session's ranges over the next document or the undone text; the engine now ends the session at the switch and at the undo. Until then the next document also took no updates.
+- After a proofread the next keystroke reports its `onTextMutation` again.
 
 ## [0.14.0] - 2026-10-04
 
