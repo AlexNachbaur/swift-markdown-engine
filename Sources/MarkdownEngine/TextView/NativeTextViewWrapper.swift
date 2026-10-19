@@ -313,9 +313,9 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.onPasteImage = onPasteImage
         if #available(macOS 15.1, *) {
-            // Inline: rewrites morph in place. AppKit assumes the text view sits at the
-            // document view's origin, ours doesn't (#205): on 15.1–26 the text below a
-            // rewrite dims for the animation, on 27 a later grammar overlay can jump.
+            // Inline: rewrites morph in place. On 15.1–26 the text below a rewrite dims
+            // for the animation: AppKit's older path wants the text view directly in the
+            // clip view, ours sits in the container.
             textView.writingToolsBehavior = .complete
             WritingToolsEditTrackerFix.install()
         }

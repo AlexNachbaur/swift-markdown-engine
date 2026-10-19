@@ -423,8 +423,8 @@ struct HeaderFitsContentTests {
         #expect(stack.container.scrollableContentHeight == expectedTotal)
         // Container frame matches exactly (no viewport inflation).
         #expect(stack.container.frame.height == expectedTotal)
-        // Text view sits below the header.
-        #expect(stack.textView.frame.origin.y == 60)
+        // Text view shows below the header.
+        #expect(stack.container.shownTextViewOrigin.y == 60)
     }
 
     @Test func headerChangeReReportsIntrinsicSize() {
