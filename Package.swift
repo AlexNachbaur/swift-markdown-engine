@@ -14,6 +14,10 @@ import PackageDescription
 // products, which ship pre-built bridges backed by a bundled highlight.js
 // and SwiftMath respectively. Both products are opt-in: the core
 // `MarkdownEngine` library stays free of them at link time.
+//
+// `MarkdownEngineWebKit` is a third opt-in bridge: a WKWebView-backed
+// `HTMLBlockRenderer` for raw HTML blocks. It adds no package dependency,
+// only the system WebKit framework, which the core target never links.
 let package = Package(
     name: "MarkdownEngine",
     platforms: [.macOS(.v14)],
@@ -21,6 +25,7 @@ let package = Package(
         .library(name: "MarkdownEngine", targets: ["MarkdownEngine"]),
         .library(name: "MarkdownEngineCodeBlocks", targets: ["MarkdownEngineCodeBlocks"]),
         .library(name: "MarkdownEngineLatex", targets: ["MarkdownEngineLatex"]),
+        .library(name: "MarkdownEngineWebKit", targets: ["MarkdownEngineWebKit"]),
     ],
     dependencies: [
         .package(url: "https://github.com/mgriebling/SwiftMath", from: "1.7.0"),
@@ -42,6 +47,10 @@ let package = Package(
                 .product(name: "SwiftMath", package: "SwiftMath"),
             ]
         ),
+        .target(
+            name: "MarkdownEngineWebKit",
+            dependencies: ["MarkdownEngine"]
+        ),
         .testTarget(
             name: "MarkdownEngineTests",
             dependencies: ["MarkdownEngine"]
@@ -53,6 +62,10 @@ let package = Package(
         .testTarget(
             name: "MarkdownEngineLatexTests",
             dependencies: ["MarkdownEngine", "MarkdownEngineLatex"]
+        ),
+        .testTarget(
+            name: "MarkdownEngineWebKitTests",
+            dependencies: ["MarkdownEngine", "MarkdownEngineWebKit"]
         )
     ]
 )

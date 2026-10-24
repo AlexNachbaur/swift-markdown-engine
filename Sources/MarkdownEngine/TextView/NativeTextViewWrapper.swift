@@ -584,15 +584,21 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         // embedder is the source of truth.
         let newImageFingerprint = configuration.services.images.fingerprint()
         let newWikiFingerprint = configuration.services.wikiLinks.fingerprint()
+        let newHTMLBlockFingerprint = configuration.services.htmlBlockFingerprint
         let imageChanged = newImageFingerprint != context.coordinator.lastImageFingerprint
         let wikiChanged = newWikiFingerprint != context.coordinator.lastWikiFingerprint
-        if imageChanged || wikiChanged {
+        let htmlBlocksChanged = newHTMLBlockFingerprint != context.coordinator.lastHTMLBlockFingerprint
+        if imageChanged || wikiChanged || htmlBlocksChanged {
             context.coordinator.lastImageFingerprint = newImageFingerprint
             context.coordinator.lastWikiFingerprint = newWikiFingerprint
+            context.coordinator.lastHTMLBlockFingerprint = newHTMLBlockFingerprint
             context.coordinator.configuration.services = configuration.services
             textView.configuration.services = configuration.services
-            // Only an image change needs a layout re-measure; a wiki-link rename is style-only.
-            if imageChanged, let tlm = textView.textLayoutManager {
+            // Views made by the old renderer drew with its resources; make them again.
+            if htmlBlocksChanged { textView.removeAllHTMLBlockViews() }
+            // An image change re-measures; so does an HTML-block one (switching
+            // the renderer on or off reparses). A wiki-link rename is style-only.
+            if imageChanged || htmlBlocksChanged, let tlm = textView.textLayoutManager {
                 tlm.invalidateLayout(for: tlm.documentRange)
             }
             // Restyle live tv content — full rebuild would clobber paste-fresh embeds when `text` binding hasn't caught up.
@@ -600,6 +606,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             if fullRange.length > 0 {
                 context.coordinator.restyleParagraphs([fullRange], in: textView)
             }
+            if htmlBlocksChanged { textView.updateHTMLBlockViews() }
         }
         textView.isEditable = isEditable
         textView.isSelectable = true
@@ -785,6 +792,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         coordinator.configuration = configuration
         coordinator.lastImageFingerprint = configuration.services.images.fingerprint()
         coordinator.lastWikiFingerprint = configuration.services.wikiLinks.fingerprint()
+        coordinator.lastHTMLBlockFingerprint = configuration.services.htmlBlockFingerprint
         coordinator.onCodeBlockSelectionChange = onCodeBlockSelectionChange
         coordinator.onInlinePreviewKey = onInlinePreviewKey
         coordinator.onDirectiveCompletion = onDirectiveCompletion

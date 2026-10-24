@@ -69,6 +69,9 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     /// returns the current value, regardless of when state changed.
     var lastImageFingerprint: AnyHashable?
     var lastWikiFingerprint: AnyHashable?
+    /// Last HTML-block renderer state reflected in the text view: whether it is
+    /// enabled, and its `fingerprint()`. See `MarkdownEditorServices.htmlBlockFingerprint`.
+    var lastHTMLBlockFingerprint: AnyHashable?
     private var busObservers: [NSObjectProtocol] = []
     private var registeredAppearanceObserverName: Notification.Name?
     weak var textView: NSTextView?

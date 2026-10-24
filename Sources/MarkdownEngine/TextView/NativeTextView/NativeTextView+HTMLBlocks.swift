@@ -78,6 +78,16 @@ final class HTMLBlockHostView: NSView {
     }
 }
 
+// MARK: - Renderer changes
+
+extension MarkdownEditorServices {
+    /// Changes when the hosted views must be made again: the renderer was
+    /// switched on or off, or reports different drawing resources.
+    var htmlBlockFingerprint: AnyHashable {
+        [AnyHashable(htmlBlocks.isEnabled), htmlBlocks.fingerprint()]
+    }
+}
+
 // MARK: - Reconcile
 
 extension NativeTextView {

@@ -307,6 +307,22 @@ struct HTMLBlockHostingTests {
         #expect(frames.count == 2 && frames[0] < frames[1])
     }
 
+    @Test("Switching the renderer on or off, or changing its fingerprint, changes what the wrapper compares")
+    func rendererFingerprint() {
+        struct Versioned: HTMLBlockRenderer {
+            let version: Int
+            var isEnabled: Bool { true }
+            func makeView(for block: HTMLBlockContent, heightDidChange: @escaping @MainActor (CGFloat) -> Void) -> NSView { NSView() }
+            func update(_ view: NSView, for block: HTMLBlockContent) {}
+            func fingerprint() -> AnyHashable { version }
+        }
+        let off = MarkdownEditorServices().htmlBlockFingerprint
+        let on = MarkdownEditorServices(htmlBlocks: RecordingHTMLBlockRenderer()).htmlBlockFingerprint
+        #expect(off != on)
+        #expect(MarkdownEditorServices(htmlBlocks: Versioned(version: 1)).htmlBlockFingerprint
+                != MarkdownEditorServices(htmlBlocks: Versioned(version: 2)).htmlBlockFingerprint)
+    }
+
     @Test("Removing all views clears pending height work")
     func removeAllClearsState() throws {
         let renderer = RecordingHTMLBlockRenderer()

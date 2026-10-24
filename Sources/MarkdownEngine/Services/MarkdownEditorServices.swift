@@ -243,6 +243,16 @@ public protocol HTMLBlockRenderer: Sendable {
     /// `block`, after its HTML, font or theme changed.
     @MainActor
     func update(_ view: NSView, for block: HTMLBlockContent)
+
+    /// Coarse fingerprint of what the renderer draws with, such as the
+    /// resources it can read or its stylesheet. When a new configuration
+    /// carries a different value, every view is made again, so content that
+    /// failed to load before (a folder the user just granted access to) loads.
+    func fingerprint() -> AnyHashable
+}
+
+public extension HTMLBlockRenderer {
+    func fingerprint() -> AnyHashable { 0 }
 }
 
 /// What an ``HTMLBlockRenderer`` draws: the block's HTML and the document's
