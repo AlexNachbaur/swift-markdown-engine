@@ -673,8 +673,9 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             context.coordinator.didInitialFormatting = false
             context.coordinator.didEnsureLayoutForCurrentDocument = false
             context.coordinator.resetImageEmbedState()
-            // Drop old document's wide-table overlays synchronously.
+            // Drop old document's wide-table overlays and HTML-block views synchronously.
             textView.removeAllWideTableOverlays()
+            textView.removeAllHTMLBlockViews()
             // And its autocorrection underlines, which AppKit keeps per view.
             textView.removeCorrectionUnderlines()
             // Park at top during the rebuild; the new document's own saved offset

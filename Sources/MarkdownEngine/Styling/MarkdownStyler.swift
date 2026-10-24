@@ -31,6 +31,7 @@ extension MarkdownStyler {
         let imageLink: [IndexedToken]
         let table: [IndexedToken]
         let code: [MarkdownToken]   // codeBlock + inlineCode, for isInsideCodeBlock checks
+        var htmlBlock: [IndexedToken] = []
     }
 
     struct StylingContext {
@@ -63,6 +64,7 @@ extension MarkdownStyler {
         var imageEmbedIndexed: [IndexedToken] { classified?.imageEmbed ?? Self.indexed(tokens, .imageEmbed) }
         var imageLinkIndexed: [IndexedToken] { classified?.imageLink ?? Self.indexed(tokens, .imageLink) }
         var tableIndexed: [IndexedToken] { classified?.table ?? Self.indexed(tokens, .table) }
+        var htmlBlockIndexed: [IndexedToken] { classified?.htmlBlock ?? Self.indexed(tokens, .htmlBlock) }
 
         static func indexed(_ tokens: [MarkdownToken], _ kind: MarkdownTokenKind) -> [IndexedToken] {
             tokens.enumerated().compactMap { $0.element.kind == kind ? ($0.offset, $0.element) : nil }
@@ -238,6 +240,7 @@ enum MarkdownStyler {
         result += styleInlineLatex(ctx)
         result += styleImageEmbeds(ctx)
         result += styleImageLinks(ctx)
+        result += styleHTMLBlocks(ctx)
         let imgMs = Double(DispatchTime.now().uptimeNanoseconds - imgT0) / 1_000_000
         result += styleTables(ctx)
         PerfTrace.note { "  styleAttributes: ast=\(String(format: "%.2f", astMs))ms latex+img4=\(String(format: "%.2f", imgMs))ms styledRanges=\(result.count)" }
@@ -365,6 +368,7 @@ extension MarkdownStyler {
         alignment: NSTextAlignment,
         mode: RenderedStandaloneBlockMode,
         restyleOnWidthChange: Bool = false,
+        anchorAttributes: [NSAttributedString.Key: Any] = [:],
         ctx: StylingContext,
         attrs: inout [StyledRange]
     ) -> Bool {
@@ -374,9 +378,12 @@ extension MarkdownStyler {
         let baseLineHeight = layoutBridgeDefaultLineHeight(for: ctx.baseFont, using: ctx.layoutBridge)
         para.paragraphSpacingBefore = max(para.paragraphSpacingBefore, paragraphSpacingBefore)
         para.alignment = alignment
-        let widthChangeAnchorAttrs: [NSAttributedString.Key: Any] = restyleOnWidthChange
-            ? [.scrollableBlockFullRange: NSValue(range: paraRange)]
-            : [:]
+        // Extra attributes for the one anchor character a collapsed block draws
+        // from (an HTML block's view tag); `restyleOnWidthChange` adds its own.
+        var widthChangeAnchorAttrs = anchorAttributes
+        if restyleOnWidthChange {
+            widthChangeAnchorAttrs[.scrollableBlockFullRange] = NSValue(range: paraRange)
+        }
 
         switch mode {
         case .collapsedSource(let markerTexts):

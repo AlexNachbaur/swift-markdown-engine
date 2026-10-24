@@ -201,9 +201,10 @@ extension NativeTextViewCoordinator {
             previousSelectedRange = finalSelection
         }
 
-        // Reconcile wide-table overlays after layout settles.
+        // Reconcile wide-table overlays and HTML-block views after layout settles.
         if let nativeTextView = textView as? NativeTextView {
             nativeTextView.updateWideTableOverlays()
+            nativeTextView.updateHTMLBlockViews()
         }
     }
 
@@ -254,6 +255,7 @@ extension NativeTextViewCoordinator {
         if case .all = content,
            let nativeTextView = textView as? NativeTextView {
             nativeTextView.updateWideTableOverlays()
+            nativeTextView.updateHTMLBlockViews()
         }
         return wideTableAnchorRanges
     }
@@ -286,6 +288,7 @@ extension NativeTextViewCoordinator {
         var imageEmbedIdx: [(index: Int, token: MarkdownToken)] = []
         var imageLinkIdx: [(index: Int, token: MarkdownToken)] = []
         var tableIdx: [(index: Int, token: MarkdownToken)] = []
+        var htmlBlockIdx: [(index: Int, token: MarkdownToken)] = []
 
         codeTokens.reserveCapacity(tokens.count / 2)
         latexTokens.reserveCapacity(tokens.count / 4)
@@ -315,6 +318,8 @@ extension NativeTextViewCoordinator {
             case .table:
                 tableTokens.append(token)
                 tableIdx.append((index, token))
+            case .htmlBlock:
+                htmlBlockIdx.append((index, token))
             default:
                 break
             }
@@ -339,7 +344,7 @@ extension NativeTextViewCoordinator {
             classified: MarkdownStyler.ClassifiedStyleTokens(
                 inlineLatex: inlineLatexIdx, blockLatex: blockLatexIdx,
                 imageEmbed: imageEmbedIdx, imageLink: imageLinkIdx,
-                table: tableIdx, code: codeTokens),
+                table: tableIdx, code: codeTokens, htmlBlock: htmlBlockIdx),
             version: parsedDocumentVersion
         )
         cachedParsedText = text

@@ -26,7 +26,9 @@ enum MarkdownDetection {
         for (index, token) in tokens.enumerated() {
             let start = token.range.location
             let end = NSMaxRange(token.range)
-            if selectionRange.length > 0 && (token.kind == .inlineLatex || token.kind == .blockLatex) && NSIntersectionRange(selectionRange, token.range).length > 0 {
+            if selectionRange.length > 0
+                && (token.kind == .inlineLatex || token.kind == .blockLatex || token.kind == .htmlBlock)
+                && NSIntersectionRange(selectionRange, token.range).length > 0 {
                 indices.insert(index)
                 continue
             }

@@ -88,6 +88,15 @@ final class NativeTextView: NSTextView {
     /// Persisted horizontal scroll offset per wide table; survives restyles.
     var tableHorizontalScrollOffsets: [Int: CGFloat] = [:]
 
+    // MARK: HTML-block view state (`NativeTextView+HTMLBlocks.swift`)
+    /// One hosted renderer view per rendered HTML block, keyed by occurrence
+    /// and HTML; hidden rather than destroyed while the caret is inside.
+    var htmlBlockViews: [String: HTMLBlockHostView] = [:]
+    /// Bumped per reconcile; hidden views unseen for a while are dropped.
+    var htmlBlockReconcileGeneration = 0
+    /// HTML whose reported height changed since the last restyle of its block.
+    var htmlBlocksAwaitingRestyle: Set<String> = []
+
     /// While Writing Tools slide the text below an edit into place: the rest of the
     /// edited paragraph; fragments from its end on are not drawn (`NativeTextView+WritingTools`).
     var writingToolsHiddenRemainder: NSTextRange?

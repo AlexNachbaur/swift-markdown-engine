@@ -36,6 +36,8 @@ public struct MarkdownEditorConfiguration: Sendable {
     public var headings: HeadingStyle
     public var imageEmbed: ImageEmbedStyle
     public var blockLatex: BlockLatexStyle
+    /// Spacing around raw HTML blocks drawn by ``MarkdownEditorServices/htmlBlocks``.
+    public var htmlBlock: HTMLBlockStyle
     public var inlineLatex: InlineLatexStyle
     public var blockquote: BlockquoteStyle
     public var thematicBreak: ThematicBreakStyle
@@ -107,6 +109,7 @@ public struct MarkdownEditorConfiguration: Sendable {
         headings: HeadingStyle = .default,
         imageEmbed: ImageEmbedStyle = .default,
         blockLatex: BlockLatexStyle = .default,
+        htmlBlock: HTMLBlockStyle = .default,
         inlineLatex: InlineLatexStyle = .default,
         blockquote: BlockquoteStyle = .default,
         thematicBreak: ThematicBreakStyle = .default,
@@ -137,6 +140,7 @@ public struct MarkdownEditorConfiguration: Sendable {
         self.headings = headings
         self.imageEmbed = imageEmbed
         self.blockLatex = blockLatex
+        self.htmlBlock = htmlBlock
         self.inlineLatex = inlineLatex
         self.blockquote = blockquote
         self.thematicBreak = thematicBreak
@@ -546,6 +550,21 @@ public struct BlockLatexStyle: Sendable {
     }
 
     public static let `default` = BlockLatexStyle()
+}
+
+/// Spacing around raw HTML blocks rendered by an ``HTMLBlockRenderer``.
+public struct HTMLBlockStyle: Sendable {
+    /// Space above a rendered block.
+    public var paragraphSpacingBefore: CGFloat
+    /// Space below a rendered block.
+    public var paragraphSpacing: CGFloat
+
+    public init(paragraphSpacingBefore: CGFloat = 8, paragraphSpacing: CGFloat = 12) {
+        self.paragraphSpacingBefore = paragraphSpacingBefore
+        self.paragraphSpacing = paragraphSpacing
+    }
+
+    public static let `default` = HTMLBlockStyle()
 }
 
 /// Reserved for future inline-LaTeX (`$...$`) tuning. Currently has no

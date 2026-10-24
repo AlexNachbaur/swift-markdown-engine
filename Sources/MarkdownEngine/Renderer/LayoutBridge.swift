@@ -18,6 +18,12 @@ func layoutBridgeDefaultLineHeight(for font: NSFont, using bridge: LayoutBridge?
 final class LayoutBridge {
     private let textLayoutManager: NSTextLayoutManager
 
+    /// Content heights the HTML-block views last reported, keyed by the
+    /// block's HTML. The styler reserves these synchronously; the text view
+    /// writes them as views report and restyles the block. Lives here because
+    /// the bridge is the one per-view object every styling pass already holds.
+    var htmlBlockHeights: [String: CGFloat] = [:]
+
     init(_ textLayoutManager: NSTextLayoutManager) {
         self.textLayoutManager = textLayoutManager
     }

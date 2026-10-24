@@ -346,6 +346,9 @@ extension NativeTextView {
             layoutAlreadySettled: layoutAlreadySettled,
             knownWideTableAnchorRanges: wideTableAnchorRanges
         )
+        // HTML-block views take the new column width; their content then
+        // reports its new height, which restyles the block.
+        updateHTMLBlockViews()
     }
 
     override func scrollRangeToVisible(_ range: NSRange) {
