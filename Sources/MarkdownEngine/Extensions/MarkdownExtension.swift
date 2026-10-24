@@ -161,28 +161,34 @@ struct ExtensionRegistry {
     /// already keys on — registering a directive invalidates those caches with
     /// no second key to thread through the pipeline.
     let directives: DirectiveRegistry
+    /// Whether raw HTML blocks (CommonMark §4.6) are recognized. True only
+    /// when an ``HTMLBlockRenderer`` is registered; otherwise HTML stays
+    /// literal text, exactly as before HTML blocks existed.
+    let htmlBlocks: Bool
     /// Stable fingerprint for cache keying ("" when empty). Two registries with
     /// the same fingerprint produce identical parses for identical text.
     let fingerprint: String
 
-    static let empty = ExtensionRegistry(entries: [], blockEntries: [], directives: .empty, fingerprint: "")
+    static let empty = ExtensionRegistry(entries: [], blockEntries: [], directives: .empty, htmlBlocks: false, fingerprint: "")
 
-    private init(entries: [Entry], blockEntries: [BlockEntry], directives: DirectiveRegistry, fingerprint: String) {
+    private init(entries: [Entry], blockEntries: [BlockEntry], directives: DirectiveRegistry, htmlBlocks: Bool, fingerprint: String) {
         self.entries = entries
         self.blockEntries = blockEntries
         self.directives = directives
+        self.htmlBlocks = htmlBlocks
         self.fingerprint = fingerprint
     }
 
-    init(extensions: [any MarkdownExtension], directives: DirectiveRegistry = .empty) {
-        // Directives alone are a non-empty grammar: only bail out when BOTH
-        // halves are empty, or a directive-only configuration would parse as
-        // pure markdown.
-        guard !extensions.isEmpty || !directives.isEmpty else {
+    init(extensions: [any MarkdownExtension], directives: DirectiveRegistry = .empty, htmlBlocks: Bool = false) {
+        // Directives alone are a non-empty grammar, and so is HTML-block
+        // recognition: only bail out when every part is empty, or such a
+        // configuration would parse as pure markdown.
+        guard !extensions.isEmpty || !directives.isEmpty || htmlBlocks else {
             self = .empty
             return
         }
         self.directives = directives
+        self.htmlBlocks = htmlBlocks
         self.entries = extensions.compactMap { ext in
             guard let syntax = ext.inline else { return nil }
             return Entry(
@@ -219,13 +225,15 @@ struct ExtensionRegistry {
         // One grammar fingerprint covering both seams. The `~` separator keeps
         // the halves distinguishable; an empty half contributes nothing, so a
         // directive-free registry keeps the fingerprint it had before
-        // directives existed.
-        self.fingerprint = directives.isEmpty
+        // directives existed. HTML-block recognition appends a fixed `~html`
+        // only when enabled, for the same reason.
+        let seams = directives.isEmpty
             ? extensionFingerprint
             : extensionFingerprint + "~" + directives.fingerprint
+        self.fingerprint = htmlBlocks ? seams + "~html" : seams
     }
 
-    var isEmpty: Bool { entries.isEmpty && blockEntries.isEmpty && directives.isEmpty }
+    var isEmpty: Bool { entries.isEmpty && blockEntries.isEmpty && directives.isEmpty && !htmlBlocks }
 
     /// The first registered block rule whose fence opens `line` (column 0),
     /// or nil. Registration order is precedence, matching the inline rules.
@@ -240,9 +248,14 @@ struct ExtensionRegistry {
 }
 
 extension MarkdownEditorConfiguration {
-    /// The parser-facing registry derived from `extensions` and `directives`.
+    /// The parser-facing registry derived from `extensions`, `directives`, and
+    /// whether an HTML-block renderer is registered.
     var extensionRegistry: ExtensionRegistry {
-        ExtensionRegistry(extensions: extensions, directives: directiveRegistry)
+        ExtensionRegistry(
+            extensions: extensions,
+            directives: directiveRegistry,
+            htmlBlocks: services.htmlBlocks.isEnabled
+        )
     }
 
     /// Styler-facing lookup: extension behavior by id.

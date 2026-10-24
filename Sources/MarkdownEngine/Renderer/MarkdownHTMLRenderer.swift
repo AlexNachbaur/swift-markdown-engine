@@ -100,6 +100,11 @@ public enum MarkdownHTMLRenderer {
         case .blockLatex(let range):
             return "<pre>\(escape(ns.substring(with: range).trimmingCharacters(in: .newlines)))</pre>"
 
+        case .htmlBlock(let range):
+            // Already HTML: copied through as written, so a rich paste shows
+            // what the document shows. Comments pass through and stay unseen.
+            return ns.substring(with: range).trimmingCharacters(in: .newlines)
+
         case .table(let range):
             return renderTable(range: range, ns: ns)
 

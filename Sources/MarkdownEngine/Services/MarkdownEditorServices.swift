@@ -207,6 +207,75 @@ public struct NoOpLatexRenderer: LatexRenderer {
     public func render(latex: String, fontSize: CGFloat, theme: MarkdownEditorTheme) -> LatexRenderResult? { nil }
 }
 
+// MARK: - HTML Blocks
+
+/// Renders raw HTML blocks (CommonMark §4.6) as views placed in the text flow.
+///
+/// Registering an enabled renderer turns on HTML-block recognition. With the
+/// default ``NoOpHTMLBlockRenderer``, HTML stays literal text, exactly as
+/// before, and documents parse identically.
+///
+/// The engine owns layout: it hosts one view per block at the text column's
+/// width, reserves the block's height in the text flow so the content below
+/// moves down, and hides the view while the caret is inside the block so the
+/// source can be edited. The renderer only draws: it builds the view and
+/// reports the height its content needs, whenever that changes. Content such
+/// as a web page lays out asynchronously, so the engine never waits for a
+/// height — it reserves the last one reported and restyles the block when a
+/// new one arrives. HTML comments render as nothing and get no view.
+///
+/// The `MarkdownEngineWebKit` product ships a WebKit-based implementation.
+public protocol HTMLBlockRenderer: Sendable {
+    /// Whether HTML blocks are recognized at all. `false` keeps HTML literal
+    /// text; the engine reads it whenever it parses.
+    var isEnabled: Bool { get }
+
+    /// Makes the view that draws `block`. The engine sets its frame: the text
+    /// column's width, and the height last reported.
+    ///
+    /// Call `heightDidChange` with the height the content needs at the view's
+    /// current width once it is known, and again whenever it changes (an image
+    /// loads, the width changes). Calls with an unchanged height are ignored.
+    @MainActor
+    func makeView(for block: HTMLBlockContent, heightDidChange: @escaping @MainActor (CGFloat) -> Void) -> NSView
+
+    /// Brings a view made by ``makeView(for:heightDidChange:)`` up to date with
+    /// `block`, after its HTML, font or theme changed.
+    @MainActor
+    func update(_ view: NSView, for block: HTMLBlockContent)
+}
+
+/// What an ``HTMLBlockRenderer`` draws: the block's HTML and the document's
+/// body style, so rendered text can match the text around it.
+public struct HTMLBlockContent: Sendable {
+    /// The block's raw HTML, exactly as written, without the trailing newline.
+    public let html: String
+    /// PostScript name of the document's body font.
+    public let fontName: String
+    /// Point size of the document's body font.
+    public let fontSize: CGFloat
+    /// The editor theme, for text and link colors.
+    public let theme: MarkdownEditorTheme
+
+    public init(html: String, fontName: String, fontSize: CGFloat, theme: MarkdownEditorTheme) {
+        self.html = html
+        self.fontName = fontName
+        self.fontSize = fontSize
+        self.theme = theme
+    }
+}
+
+/// Default renderer that leaves HTML-block recognition off, so HTML stays
+/// literal text.
+public struct NoOpHTMLBlockRenderer: HTMLBlockRenderer {
+    public init() {}
+    public var isEnabled: Bool { false }
+    public func makeView(for block: HTMLBlockContent, heightDidChange: @escaping @MainActor (CGFloat) -> Void) -> NSView {
+        NSView()
+    }
+    public func update(_ view: NSView, for block: HTMLBlockContent) {}
+}
+
 // MARK: - Event Bus
 
 /// Optional notification-name bridge that lets the editor communicate with
@@ -342,6 +411,8 @@ public struct MarkdownEditorServices: Sendable {
     public var images: any EmbeddedImageProvider
     public var syntaxHighlighter: any SyntaxHighlighter
     public var latex: any LatexRenderer
+    /// Draws raw HTML blocks; the no-op default keeps HTML literal text.
+    public var htmlBlocks: any HTMLBlockRenderer
     public var bus: MarkdownEditorBus
 
     public init(
@@ -349,12 +420,14 @@ public struct MarkdownEditorServices: Sendable {
         images: any EmbeddedImageProvider = NoOpEmbeddedImageProvider(),
         syntaxHighlighter: any SyntaxHighlighter = PlainTextSyntaxHighlighter(),
         latex: any LatexRenderer = NoOpLatexRenderer(),
+        htmlBlocks: any HTMLBlockRenderer = NoOpHTMLBlockRenderer(),
         bus: MarkdownEditorBus = .default
     ) {
         self.wikiLinks = wikiLinks
         self.images = images
         self.syntaxHighlighter = syntaxHighlighter
         self.latex = latex
+        self.htmlBlocks = htmlBlocks
         self.bus = bus
     }
 

@@ -47,12 +47,14 @@ indirect enum BlockNode: Equatable {
     case thematicBreak(range: NSRange)
     case blank(range: NSRange)
     case ext(ExtensionBlockNode)
+    /// Raw HTML (CommonMark §4.6) — opaque; no inline parsing.
+    case htmlBlock(range: NSRange)
 
     var range: NSRange {
         switch self {
         case .paragraph(let r, _), .heading(_, let r, _, _), .blockquote(let r, _),
              .list(let r, _), .codeBlock(let r), .blockLatex(let r), .table(let r),
-             .thematicBreak(let r), .blank(let r):
+             .thematicBreak(let r), .blank(let r), .htmlBlock(let r):
             return r
         case .ext(let node):
             return node.range
@@ -187,6 +189,8 @@ enum DocumentAST {
             return .thematicBreak(range: block.range)
         case .blank:
             return .blank(range: block.range)
+        case .htmlBlock:
+            return .htmlBlock(range: block.range)
         case .ext(let id):
             return extensionBlock(id: id, range: block.range, ns, scoped: scoped, registry: registry)
         }

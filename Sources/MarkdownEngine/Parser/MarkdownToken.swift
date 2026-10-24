@@ -39,6 +39,9 @@ enum MarkdownTokenKind: Equatable {
     /// A fenced block contributed by a registered `MarkdownExtension`,
     /// carrying the extension's id (e.g. `.extensionBlock("container")`).
     case extensionBlock(String)
+    /// A raw HTML block (CommonMark §4.6); only produced when an
+    /// `HTMLBlockRenderer` is registered. No markers: the whole block is source.
+    case htmlBlock
 }
 
 struct MarkdownToken {

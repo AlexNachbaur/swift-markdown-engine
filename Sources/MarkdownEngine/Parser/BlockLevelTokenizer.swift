@@ -51,10 +51,24 @@ enum BlockLevelTokenizer {
         case .blockLatex:  return blockLatex(in: sub)
         case .ext(let id): return extensionBlock(in: sub, id: id,
                                                  fence: registry.blockEntry(for: id)?.fence ?? "")
+        case .htmlBlock:   return htmlBlock(in: sub)
         case .paragraph, .list, .thematicBreak, .blank:
             // Safety-net table scan; tables/block LaTeX are their own blocks now, inline `$$…$$` stays plain.
             return table(in: sub)
         }
+    }
+
+    // MARK: - Raw HTML block  (CommonMark §4.6; grouped by BlockParser)
+
+    /// One token over the whole block, without its trailing line break. Raw
+    /// HTML has no markers: rendered, the whole source collapses; active, all
+    /// of it shows.
+    private static func htmlBlock(in s: NSString) -> [MarkdownToken] {
+        var end = s.length
+        while end > 0, s.character(at: end - 1) == lf || s.character(at: end - 1) == 0x0D { end -= 1 }
+        guard end > 0 else { return [] }
+        let range = NSRange(location: 0, length: end)
+        return [MarkdownToken(kind: .htmlBlock, range: range, contentRange: range, markerRanges: [])]
     }
 
     // MARK: - Extension fenced block  (open fence line … closing fence line / EOF)

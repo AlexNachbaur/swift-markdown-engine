@@ -702,6 +702,8 @@ enum MarkdownASTStyler {
             styleExtensionBlock(node, font: font, ctx: ctx, into: &attrs)
         case .blockLatex, .table, .blank:
             break   // NSImage rendering ported next
+        case .htmlBlock:
+            break   // rendered by `styleHTMLBlocks`; active source stays body text
         }
     }
 
@@ -967,7 +969,7 @@ enum MarkdownASTStyler {
                 for item in items { shrinkInlineMarkers(item.inlines, ctx: ctx, into: &attrs) }
             case .ext(let node):
                 shrinkInlineMarkers(node.inlines, ctx: ctx, into: &attrs)
-            case .codeBlock, .blockLatex, .table, .thematicBreak, .blank:
+            case .codeBlock, .blockLatex, .table, .thematicBreak, .blank, .htmlBlock:
                 break
             }
         }

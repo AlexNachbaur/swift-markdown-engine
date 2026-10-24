@@ -34,6 +34,7 @@ enum BlockKind: Equatable {
     case thematicBreak   // `---` / `***` / `___` — produces no token today
     case blank           // blank / whitespace-only line(s) — separator
     case ext(String)     // extension-supplied fenced block (id), inline-bearing content
+    case htmlBlock       // CommonMark raw HTML block — opaque; only when an HTML renderer is registered
 }
 
 /// One block; `range` is the absolute UTF-16 span of its lines, tiling with no gaps.
@@ -131,7 +132,7 @@ enum BlockParser {
     /// the leading whitespace of an indented `$$` opener flips the pairing
     /// from arbitrarily far away from the literal `$$`. The boundary walk is
     /// capped; hitting the cap reports a delimiter (conservative full parse).
-    static func hasBlockDelimiter(_ buf: [unichar], _ lo: Int, _ hi: Int, fences: [[unichar]] = []) -> Bool {
+    static func hasBlockDelimiter(_ buf: [unichar], _ lo: Int, _ hi: Int, fences: [[unichar]] = [], htmlBlocks: Bool = false) -> Bool {
         let cap = 4096
         var start = max(0, lo - 3)
         var steps = 0
@@ -154,6 +155,10 @@ enum BlockParser {
             } else if buf[i] == 0x60, i + 2 < end, buf[i + 1] == 0x60, buf[i + 2] == 0x60 {
                 return true                                              // ```
             }
+            // HTML blocks of types 1–5 run from an opener to a distant end
+            // marker (`<!--` … `-->`, `<pre` … `</pre>`), so creating or
+            // destroying either end re-pairs blocks far from the edit.
+            if htmlBlocks, isHTMLBlockDelimiter(buf, at: i, end: end) { return true }
             // Extension fences pair with a distant partner exactly like ``` —
             // an edit touching one must force the full reparse too.
             for fence in fences where !fence.isEmpty && buf[i] == fence[0] {
@@ -166,6 +171,31 @@ enum BlockParser {
             i += 1
         }
         return false
+    }
+
+    /// An HTML-block opener or end marker whose partner can be far away:
+    /// `<!`, `<?`, `</`, `<p…`/`<s…`/`<t…` (the `<pre>`, `<script>`, `<style>`
+    /// and `<textarea>` openers), `-->`, `?>` and `]]>`. Types 6 and 7 end at
+    /// a blank line and need no entry here. Deliberately loose: a false hit
+    /// only costs a full reparse.
+    private static func isHTMLBlockDelimiter(_ buf: [unichar], at i: Int, end: Int) -> Bool {
+        let lt: unichar = 0x3C, gt: unichar = 0x3E
+        switch buf[i] {
+        case lt:
+            guard i + 1 < end else { return false }
+            switch buf[i + 1] {
+            case 0x21, 0x3F, 0x2F: return true                                    // ! ? /
+            case 0x70, 0x50, 0x73, 0x53, 0x74, 0x54: return true                  // p P s S t T
+            default: return false
+            }
+        case gt:
+            guard i >= 1 else { return false }
+            if buf[i - 1] == 0x3F { return true }                                 // ?>
+            return i >= 2 && ((buf[i - 1] == 0x2D && buf[i - 2] == 0x2D)          // -->
+                || (buf[i - 1] == 0x5D && buf[i - 2] == 0x5D))                    // ]]>
+        default:
+            return false
+        }
     }
 
     /// Splice-parse against a precomputed change region (descriptor- or scan-derived):
@@ -183,8 +213,9 @@ enum BlockParser {
 
         // A fence/block-LaTeX/extension delimiter in the edit can pair with a distant partner → full reparse.
         let fences = registry.blockEntries.map(\.fenceChars)
-        if hasBlockDelimiter(o, changeStart, changeEnd, fences: fences)
-            || hasBlockDelimiter(n, changeStart, diff.changeEndNew, fences: fences) {
+        let html = registry.htmlBlocks
+        if hasBlockDelimiter(o, changeStart, changeEnd, fences: fences, htmlBlocks: html)
+            || hasBlockDelimiter(n, changeStart, diff.changeEndNew, fences: fences, htmlBlocks: html) {
             return nil
         }
 
@@ -223,10 +254,23 @@ enum BlockParser {
         // 5. Reparse just the window substring, shift to absolute new coords.
         let windowText = newNS.substring(with: NSRange(location: winStart, length: winEndNew - winStart))
         let reparsed = computeBlocks(windowText, registry: registry).map { $0.shifted(by: winStart) }
-        // A trailing fence/latex/extension block reaching the window end might continue past it.
+        // An HTML block hides arbitrary lines — a `$$` or ``` among them pairs
+        // with nothing while hidden. Its extent hangs on its opener line and,
+        // for types 6–7, on blank lines anywhere below it, so an edit that
+        // dissolves, extends or shortens one can expose (or hide) a delimiter
+        // whose partner lies outside this window. No local delimiter marks
+        // that, so any window holding an HTML block before or after the edit
+        // takes the full parse. HTML blocks are rare in prose; the cost is a
+        // line scan per keystroke only while typing in or next to one.
+        if registry.htmlBlocks,
+           oldBlocks[winFirst...winLast].contains(where: { $0.kind == .htmlBlock })
+            || reparsed.contains(where: { $0.kind == .htmlBlock }) {
+            return nil
+        }
+        // A trailing fence/latex/extension/HTML block reaching the window end might continue past it.
         if let last = reparsed.last, NSMaxRange(last.range) >= winEndNew {
             switch last.kind {
-            case .fencedCode, .blockLatex, .ext: return nil
+            case .fencedCode, .blockLatex, .ext, .htmlBlock: return nil
             case .paragraph:
                 // The edit may have dissolved the separator that used to end
                 // this paragraph (backspace-joining two paragraphs): if the
@@ -293,6 +337,29 @@ enum BlockParser {
             return nil
         }
 
+        /// Last line index of an HTML block opened at `start`, or nil when it
+        /// does not open one. Types 1–5 run to the line holding their end
+        /// marker (possibly the opening line itself); an UNCLOSED opener stays
+        /// text, like an unclosed ``` or `$$`, rather than swallowing the rest
+        /// of the document as CommonMark would. Types 6 and 7 run to the line
+        /// before the next blank line, or to the end of the document.
+        func htmlBlockEndIndex(from start: Int, allowing types: Set<HTMLBlockStart>) -> Int? {
+            guard registry.htmlBlocks, let type = HTMLBlockStart.classify(lineText(start)),
+                  types.contains(type) else { return nil }
+            if type.hasEndMarker {
+                // The end marker may close on the opening line itself.
+                var j = start
+                while j < lines.count {
+                    if type.closes(lineText(j)) { return j }
+                    j += 1
+                }
+                return nil
+            }
+            var end = start
+            while end + 1 < lines.count, !isBlank(lineText(end + 1)) { end += 1 }
+            return end
+        }
+
         // 2. Classify + group.
         var blocks: [Block] = []
         var i = 0
@@ -307,6 +374,12 @@ enum BlockParser {
 
             } else if isFence(line), let end = fenceCloseIndex(from: i) {
                 blocks.append(Block(kind: .fencedCode, range: union(lines[i...end])))
+                i = end + 1
+
+            } else if let end = htmlBlockEndIndex(from: i, allowing: HTMLBlockStart.all) {
+                // Raw HTML (CommonMark §4.6). Only reachable with an HTML
+                // renderer registered; a `<` line can't be any later kind.
+                blocks.append(Block(kind: .htmlBlock, range: union(lines[i...end])))
                 i = end + 1
 
             } else if isThematicBreak(line) {
@@ -370,6 +443,9 @@ enum BlockParser {
                     if isTableRow(next), end + 2 < lines.count, isTableSeparator(lineText(end + 2)) { break }
                     if isBlockLatexOpen(next), blockLatexCloseIndex(from: end + 1) != nil { break }
                     if registry.blockEntry(opening: next) != nil { break }
+                    // HTML start conditions 1–6 interrupt a paragraph; 7 (any
+                    // other complete tag) does not, per CommonMark.
+                    if htmlBlockEndIndex(from: end + 1, allowing: HTMLBlockStart.interruptingParagraph) != nil { break }
                     end += 1
                 }
                 blocks.append(Block(kind: .paragraph, range: union(lines[i...end])))

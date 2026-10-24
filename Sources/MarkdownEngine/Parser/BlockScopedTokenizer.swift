@@ -168,7 +168,8 @@ extension MarkdownTokenizer {
         // parse inlines over their CONTENT only (the fence lines are syntax —
         // a `$x$` in the info string must not become a latex token).
         let inline: [MarkdownToken]
-        if kind == .fencedCode {
+        if kind == .fencedCode || kind == .htmlBlock {
+            // Raw HTML is opaque too: CommonMark parses no Markdown inside it.
             inline = []
         } else if case .ext = kind, let block = blockLevel.first {
             let ns = sub as NSString
