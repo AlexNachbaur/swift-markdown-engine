@@ -14,6 +14,7 @@
 		1A2B3C0000000000000007CC /* MarkdownEngine in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C0000000000000007BB /* MarkdownEngine */; };
 		1A2B3C0000000000000008BB /* MarkdownEngineCodeBlocks in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C0000000000000008AA /* MarkdownEngineCodeBlocks */; };
 		1A2B3C0000000000000009BB /* MarkdownEngineLatex in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C0000000000000009AA /* MarkdownEngineLatex */; };
+		1A2B3C0000000000000011BB /* MarkdownEngineWebKit in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C0000000000000011AA /* MarkdownEngineWebKit */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -32,6 +33,7 @@
 				1A2B3C0000000000000007CC /* MarkdownEngine in Frameworks */,
 				1A2B3C0000000000000008BB /* MarkdownEngineCodeBlocks in Frameworks */,
 				1A2B3C0000000000000009BB /* MarkdownEngineLatex in Frameworks */,
+				1A2B3C0000000000000011BB /* MarkdownEngineWebKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -85,6 +87,7 @@
 				1A2B3C0000000000000007BB /* MarkdownEngine */,
 				1A2B3C0000000000000008AA /* MarkdownEngineCodeBlocks */,
 				1A2B3C0000000000000009AA /* MarkdownEngineLatex */,
+				1A2B3C0000000000000011AA /* MarkdownEngineWebKit */,
 			);
 			productName = MarkdownEngineDemo;
 			productReference = 1A2B3C0000000000000003DD /* MarkdownEngineDemo.app */;
@@ -361,6 +364,10 @@
 		1A2B3C0000000000000009AA /* MarkdownEngineLatex */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = MarkdownEngineLatex;
+		};
+		1A2B3C0000000000000011AA /* MarkdownEngineWebKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MarkdownEngineWebKit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

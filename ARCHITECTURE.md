@@ -8,7 +8,7 @@ Sources/
 │   ├── Configuration/                       # MarkdownEditorConfiguration + MarkdownEditorTheme
 │   ├── Extensions/                          # the extension seam: MarkdownExtension + bundled opt-ins
 │   ├── Directives/                          # the directive seam: @font(size: 18){…} — parsing, styling, glyphs, completion
-│   ├── Services/                            # 4 protocols, no-op defaults, WikiLinkService
+│   ├── Services/                            # 5 protocols, no-op defaults, WikiLinkService
 │   ├── Parser/                              # two-phase AST: BlockParser → InlineParser → DocumentAST (+ token projection)
 │   ├── Styling/                             # MarkdownASTStyler (AST walk) + MarkdownStyler facade for NSImage passes
 │   ├── Renderer/                            # LayoutBridge, MarkdownTextLayoutFragment, EmbeddedImageCache
@@ -25,8 +25,10 @@ Sources/
 │   ├── HighlightJSBridge.swift              # SyntaxHighlighter conformance (JavaScriptCore)
 │   ├── CodeHighlightTheme.swift             # colour per highlight.js scope
 │   └── Resources/highlight.min.js           # highlight.js 11.11.1, all languages
-└── MarkdownEngineLatex/                     # opt-in SPM product — pulls in SwiftMath
-    └── SwiftMathBridge.swift                # LatexRenderer conformance
+├── MarkdownEngineLatex/                     # opt-in SPM product — pulls in SwiftMath
+│   └── SwiftMathBridge.swift                # LatexRenderer conformance
+└── MarkdownEngineWebKit/                    # opt-in SPM product — system WebKit only
+    └── WebKitHTMLBlockRenderer.swift        # HTMLBlockRenderer conformance (one WKWebView per block)
 ```
 
 The rest of this file is a per-directory tour, in the order text flows
@@ -40,8 +42,12 @@ regexes are gone, replaced by hand-written scanners and a real syntax tree.
 
 1. **`BlockParser`** splits the document into a flat, gap-free (tiling)
    sequence of `Block`s: `heading`, `paragraph`, `blockquote`, `list`,
-   `fencedCode`, `blockLatex`, `table`, `thematicBreak`, `blank`. Hand-written
-   line scanners. It memoizes the last parse (UTF-16 buffer cache) so the
+   `fencedCode`, `blockLatex`, `table`, `thematicBreak`, `htmlBlock`, `blank`.
+   Hand-written line scanners. `htmlBlock` (CommonMark §4.6, start conditions
+   in `HTMLBlockStart`) is recognized only when the registry's `htmlBlocks`
+   flag is on, which the `HTMLBlockRenderer` service sets; an incremental
+   parse whose window holds an HTML block falls back to a full parse, since an
+   edit there can open or close a block that ends far away. It memoizes the last parse (UTF-16 buffer cache) so the
    per-keystroke callers share one line-scan.
 2. **`InlineParser`** turns a single inline-bearing block's text into an inline
    AST (`[InlineNode]`) with correct CommonMark precedence: code spans →
@@ -176,11 +182,19 @@ storage/display transform.
 
 ## [`Services/`](Sources/MarkdownEngine/Services): how does the engine talk to your app?
 
-`MarkdownEditorServices.swift` declares the four service protocols. Each is
+`MarkdownEditorServices.swift` declares the five service protocols. Each is
 called synchronously when its construct is styled or rendered: `WikiLinkResolver`
 while styling wiki-links, `EmbeddedImageProvider` from the image-embed render
 pass, `SyntaxHighlighter` from code styling, `LatexRenderer` from the LaTeX
 render passes.
+
+`HTMLBlockRenderer` is the exception that proves the invariant below. Its
+`isEnabled` is read while parsing (it switches HTML-block recognition on, and
+is part of the registry fingerprint), and its views are made after styling,
+by the text view. A view reports its content height later, through a
+callback. The height lands in `LayoutBridge.htmlBlockHeights`, which the
+styler reads synchronously on the next restyle of that block. Styling never
+waits for a view.
 
 `WikiLinkService.swift` handles the dual-form storage / display transform —
 storage is `[[Name|<id>]]`, display is `[[Name]]`. The coordinator runs it both
@@ -206,7 +220,10 @@ pipeline got wrong, e.g. the shrinking bold in `# **n*o*des**`.)
 facade: it builds the `StylingContext`, runs the AST styler for all text
 styling, then appends the passes that still render **NSImages** and therefore
 still consume tokens — block / inline LaTeX (`+Latex`), image embeds and image
-links (`+Images`), and rendered tables (`+Tables`). `MarkdownStyler+TaskCheckboxes`
+links (`+Images`), and rendered tables (`+Tables`). `+HTMLBlocks` rides the same
+collapsed-source anchor but draws nothing: it reserves the height the block's
+view last reported and tags the anchor for the text view to host the view.
+`MarkdownStyler+TaskCheckboxes`
 and `+BulletMarkers` no longer style (the AST styler does); they keep only the
 caret / selection range helpers (`taskSyntaxRange`, `bulletSyntaxRange`,
 `hrLineRange`) the text-view delegate uses.
@@ -255,7 +272,9 @@ the find-in-document paths for the pattern.
 Two sub-folders matter:
 
 - `NativeTextView/` — extensions on the AppKit subclass (paste, drag-select
-  boost, spell policy, caret workarounds, frame/overscroll management)
+  boost, spell policy, caret workarounds, frame/overscroll management, and
+  `+HTMLBlocks`, which hosts one renderer view per rendered HTML block over
+  the space the styler reserved, the way wide-table overlays are hosted)
 - `Coordinator/` — `NSTextViewDelegate` glue, split by concern (restyling,
   writing-tools, find, code-blocks, inline selection, autocorrect)
 

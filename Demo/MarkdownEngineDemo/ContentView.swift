@@ -8,15 +8,19 @@
 import SwiftUI
 import MarkdownEngine
 
-// Optional bridge products. Each is independent — drop either of these
+// Optional bridge products. Each is independent — drop any of these
 // `#if` blocks (or remove the matching Swift Package product dependency
 // from the Xcode project) and the demo still compiles. Code blocks fall
-// back to plain monospace; LaTeX falls back to its raw `$…$` source.
+// back to plain monospace; LaTeX falls back to its raw `$…$` source; HTML
+// blocks fall back to literal text.
 #if canImport(MarkdownEngineCodeBlocks)
 import MarkdownEngineCodeBlocks
 #endif
 #if canImport(MarkdownEngineLatex)
 import MarkdownEngineLatex
+#endif
+#if canImport(MarkdownEngineWebKit)
+import MarkdownEngineWebKit
 #endif
 
 struct ContentView: View {
@@ -286,6 +290,13 @@ struct ContentView: View {
         // configurable via `config.directiveSettings`.
         config.directives = seamsEnabled ? [FontDirective(), ColorDirective()] : []
 
+        #if canImport(MarkdownEngineWebKit)
+        // Raw HTML blocks, drawn by WebKit. The engine recognizes them only
+        // while a renderer is registered, so like the two seams above, the
+        // toggle turns them back into literal text.
+        config.services.htmlBlocks = seamsEnabled ? WebKitHTMLBlockRenderer() : NoOpHTMLBlockRenderer()
+        #endif
+
         // The second opt-in seam: named inline commands with typed arguments,
         // for constructs that need a name and parameters rather than
         // delimiters. The marker defaults to `@` and is configurable via
@@ -334,6 +345,7 @@ private var sampleMarkdown: String {
         seamsPartHeader,
         extensionSection,
         directiveSection,
+        htmlSection,
         markdownFooter,
     ].joined(separator: "\n\n")
 }
@@ -485,6 +497,49 @@ and `@pagebreak` are defined in this demo's own `DemoDirectives.swift` — \
 30–60 lines each, schema and completions included — because curated data and \
 print semantics belong to the app, not the editor.
 """
+
+/// HTML block demo when the `MarkdownEngineWebKit` bridge is linked; otherwise
+/// a short note. Unlike Part 2's products, this one decides whether the HTML
+/// PARSES: with no renderer registered, it stays literal text — which is why
+/// it lives in Part 3 and follows the seams toggle.
+private var htmlSection: String {
+    #if canImport(MarkdownEngineWebKit)
+    return """
+    ## HTML blocks — `MarkdownEngineWebKit`
+
+    `config.services.htmlBlocks = WebKitHTMLBlockRenderer()`
+
+    Raw HTML is Markdown's escape hatch for layouts its own syntax can't express. \
+    Each block below is drawn by WebKit at the column's width, and the text after it \
+    moves to fit — resize the window and watch it follow.
+
+    <div style="display: flex; gap: 12px">
+      <div style="flex: 1; padding: 10px 14px; border-radius: 8px; background: rgba(52, 199, 89, 0.15)">
+        <b>Side by side</b><br>Two columns, which Markdown alone can't do.
+      </div>
+      <div style="flex: 1; padding: 10px 14px; border-radius: 8px; background: rgba(0, 122, 255, 0.15)">
+        <b>Sized to fit</b><br>The block is exactly as tall as its content, at any width.
+      </div>
+    </div>
+
+    <details>
+    <summary>Expand me in read-only mode</summary>
+    <p>When the content changes height, the block reports it and the document reflows.</p>
+    </details>
+
+    <!-- HTML comments render as nothing, as in a browser. -->
+
+    Put the caret inside a block to edit its source; move away and it renders again.
+    """
+    #else
+    return """
+    ## HTML blocks
+
+    Link the `MarkdownEngineWebKit` product to render raw HTML blocks — see \
+    README → Customization → HTML Blocks.
+    """
+    #endif
+}
 
 /// Table layout demo: the first table's cells WRAP to the available width
 /// (CSS auto-layout style); the second has so many columns that even the

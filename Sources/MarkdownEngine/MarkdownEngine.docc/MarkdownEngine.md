@@ -11,7 +11,7 @@ LaTeX rendering, embedded images, and GitHub-style task checkboxes.
 The engine itself has **zero external dependencies**. Everything app-specific
 is injected through small service protocols, so embedders stay in control of
 where wiki-links resolve, where embedded images live, how code is highlighted,
-and how LaTeX is rendered.
+how LaTeX is rendered, and whether raw HTML blocks are drawn.
 
 ### Quick Start
 
@@ -83,6 +83,8 @@ configuration.services = services
 - ``EmbeddedImageProvider``
 - ``SyntaxHighlighter``
 - ``LatexRenderer``
+- ``HTMLBlockRenderer``
+- ``HTMLBlockContent``
 
 ### Services Container
 
@@ -95,6 +97,7 @@ configuration.services = services
 - ``NoOpEmbeddedImageProvider``
 - ``PlainTextSyntaxHighlighter``
 - ``NoOpLatexRenderer``
+- ``NoOpHTMLBlockRenderer``
 
 ### Selection & Replacement
 

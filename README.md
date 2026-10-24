@@ -33,6 +33,9 @@ checkboxes.
   the renderer
 - **Code blocks** with embedder-supplied syntax highlighting and overlayable
   copy buttons
+- **HTML blocks** — opt-in rendering of raw HTML (CommonMark §4.6), sized to
+  its content in the text flow, for layouts Markdown can't express such as
+  images side by side
 - **Reading column** — opt-in fixed-width centered column, wide tables
   break out to the full window width (`readingWidth`)
 - **Scroll-away header** — host your own SwiftUI view above the document;
@@ -64,13 +67,14 @@ targets: [
 
 Or in Xcode: **File → Add Package Dependencies…** and paste the repo URL.
 
-The package ships three library products — add only what you need:
+The package ships four library products — add only what you need:
 
 | Product | Use when |
 |---|---|
 | `MarkdownEngine` | You want the editor only. Zero external dependencies. |
 | `MarkdownEngineCodeBlocks` | You want the full visual code-block experience — background fill, monospace font, and syntax highlighting — without writing your own bridge. Bundles [highlight.js](https://highlightjs.org) (192 languages); no package dependencies. See [Customization → Code Blocks](#code-blocks). |
 | `MarkdownEngineLatex` | You want LaTeX formula rendering without writing your own bridge. Pulls in [SwiftMath](https://github.com/mgriebling/SwiftMath) transitively. See [Customization → LaTeX Rendering](#latex-rendering). |
+| `MarkdownEngineWebKit` | You want raw HTML blocks rendered in the document. Uses the system WebKit framework; no package dependencies. See [Customization → HTML Blocks](#html-blocks). |
 
 ## Quick Start
 
@@ -98,7 +102,7 @@ highlighting, themes, wiki-link state, and more.
 
 ### Service Protocols
 
-The engine talks to your app through four service protocols, each with
+The engine talks to your app through five service protocols, each with
 a no-op default so you only implement what you actually need:
 
 | Protocol | What you supply | Ready-made bridge / suggested library |
@@ -107,6 +111,7 @@ a no-op default so you only implement what you actually need:
 | `EmbeddedImageProvider` | Look up an `NSImage` for `![[Name]]` | (your asset store) |
 | `SyntaxHighlighter` | Highlight code blocks for a given language | **`HighlightJSBridge`** ([recommended](#code-blocks)) — runs a bundled [highlight.js](https://highlightjs.org) |
 | `LatexRenderer` | Render a LaTeX string to an `NSImage` | **`SwiftMathBridge`** ([recommended](#latex-rendering)) — built on [SwiftMath](https://github.com/mgriebling/SwiftMath) |
+| `HTMLBlockRenderer` | Draw a raw HTML block in a view that reports its height | **`WebKitHTMLBlockRenderer`** ([recommended](#html-blocks)) — one `WKWebView` per block |
 
 Implement what you need and pass it through `MarkdownEditorServices`:
 
@@ -183,6 +188,46 @@ configuration.services = MarkdownEditorServices(
 The bridge uses the Latin Modern math font and tints formulas with
 `MarkdownEditorTheme.latexLightModeText` / `latexDarkModeText`. Pass
 `singleLetterPaddingBottom:` to override the engine's matching default.
+
+### HTML Blocks
+
+Markdown allows raw HTML for what its own syntax can't express, such as
+images side by side or a centered figure. The engine recognizes HTML
+blocks (CommonMark §4.6) only when a renderer is supplied; without one,
+HTML stays literal text and documents style exactly as before.
+
+**Recommended path: depend on the `MarkdownEngineWebKit` product and use
+`WebKitHTMLBlockRenderer`.**
+
+```swift
+import MarkdownEngineWebKit
+
+var configuration = MarkdownEditorConfiguration.default
+configuration.services = MarkdownEditorServices(
+    htmlBlocks: WebKitHTMLBlockRenderer(
+        baseURL: documentURL.deletingLastPathComponent(),
+        resourceLoader: { url in try? Data(contentsOf: url) }
+    )
+)
+```
+
+Each block draws in a view at the text column's width and reports the
+height its content needs; the text after the block moves to fit, and
+moves again when an image loads or the window resizes. The block uses the
+document's body font and the theme's text and link colors. Putting the
+caret inside a block shows its source for editing. HTML comments render
+as nothing.
+
+Relative references resolve against `baseURL` and are read through
+`resourceLoader`, so a sandboxed app decides what may be read. When that
+changes, for example after the user grants access to a folder, pass a new
+`fingerprint:` and the editor reloads every block. Link clicks go to
+`openURL:`, which defaults to `NSWorkspace`. A block's own JavaScript is
+off unless you pass `allowsJavaScript: true`.
+
+Need a different renderer? Implement `HTMLBlockRenderer`: return a view
+from `makeView(for:heightDidChange:)` and call `heightDidChange` with the
+content's height whenever it changes. The engine owns the view's frame.
 
 ### Theming
 
