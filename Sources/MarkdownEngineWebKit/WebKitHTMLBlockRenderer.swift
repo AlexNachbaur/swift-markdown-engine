@@ -286,24 +286,34 @@ final class NavigationPolicy: NSObject, WKNavigationDelegate {
         decidePolicyFor navigationAction: WKNavigationAction,
         decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void
     ) {
-        switch navigationAction.navigationType {
-        case .other, .reload:
+        // A link with no target frame opens a new window: treat it as the main frame's.
+        let isMainFrame = navigationAction.targetFrame?.isMainFrame ?? true
+        guard isMainFrame else {
             decisionHandler(.allow)
-        case .linkActivated:
-            decisionHandler(.cancel)
-            guard let url = navigationAction.request.url else { return }
-            // A same-page anchor has nowhere to go in a block that fits its content.
-            if let current = webView.url, Self.isFragmentLink(url, on: current) { return }
-            MainActor.assumeIsolated {
-                openURL(ResourceSchemeHandler.fileURL(for: url) ?? url)
-            }
-        default:
-            decisionHandler(navigationAction.targetFrame?.isMainFrame == false ? .allow : .cancel)
+            return
         }
+        let url = navigationAction.request.url
+        guard navigationAction.navigationType == .linkActivated else {
+            // Only the block's own page loads in the main frame; a redirect,
+            // a meta refresh or a form never replaces it.
+            let isPageLoad = url.map { Self.isSamePage($0, as: Self.pageURL(for: documentBaseURL)) } ?? false
+            decisionHandler(isPageLoad ? .allow : .cancel)
+            return
+        }
+        decisionHandler(.cancel)
+        guard let url else { return }
+        // A same-page anchor has nowhere to go in a block that fits its content.
+        if url.fragment != nil, let current = webView.url, Self.isSamePage(url, as: current) { return }
+        openURL(ResourceSchemeHandler.fileURL(for: url) ?? url)
     }
 
-    static func isFragmentLink(_ url: URL, on page: URL) -> Bool {
-        guard url.fragment != nil else { return false }
+    /// The URL a block's page loads at.
+    static func pageURL(for baseURL: URL?) -> URL {
+        ResourceSchemeHandler.pageBaseURL(for: baseURL) ?? URL(string: "about:blank")!
+    }
+
+    /// Whether `url` is `page`, ignoring any fragment.
+    static func isSamePage(_ url: URL, as page: URL) -> Bool {
         var target = URLComponents(url: url, resolvingAgainstBaseURL: true)
         var current = URLComponents(url: page, resolvingAgainstBaseURL: true)
         target?.fragment = nil

@@ -53,14 +53,21 @@ struct WebKitHTMLBlockPageTests {
         #expect(file.fragment == "watering")
     }
 
-    @Test("Same-page anchors are recognized")
-    func fragmentLinks() throws {
+    @Test("Same-page URLs are recognized, ignoring the fragment")
+    func samePage() throws {
         let page = try #require(URL(string: "markdown-engine-resource://file/Garden/"))
         let anchor = try #require(URL(string: "markdown-engine-resource://file/Garden/#beds"))
         let elsewhere = try #require(URL(string: "markdown-engine-resource://file/Garden/notes.md#beds"))
-        #expect(NavigationPolicy.isFragmentLink(anchor, on: page))
-        #expect(!NavigationPolicy.isFragmentLink(elsewhere, on: page))
-        #expect(!NavigationPolicy.isFragmentLink(page, on: page))
+        #expect(NavigationPolicy.isSamePage(anchor, as: page))
+        #expect(NavigationPolicy.isSamePage(page, as: page))
+        #expect(!NavigationPolicy.isSamePage(elsewhere, as: page))
+    }
+
+    @Test("A block's page loads at its resource base, or about:blank without one")
+    func pageURLs() {
+        let folder = URL(fileURLWithPath: "/Garden", isDirectory: true)
+        #expect(NavigationPolicy.pageURL(for: folder).absoluteString == "markdown-engine-resource://file/Garden/")
+        #expect(NavigationPolicy.pageURL(for: nil).absoluteString == "about:blank")
     }
 
     @Test("MIME types come from the file extension")
@@ -202,6 +209,39 @@ struct WebKitHTMLBlockLiveTests {
         #expect(paths.contains("/Garden Notes/missing.png"))
     }
 
+    @Test("A link click goes to the handler, resolved to a file; a meta refresh never replaces the block")
+    func navigation() async throws {
+        _ = NSApplication.shared
+        let opened = OpenedLinks()
+        let folder = URL(fileURLWithPath: "/Garden", isDirectory: true)
+        let renderer = WebKitHTMLBlockRenderer(baseURL: folder, openURL: { opened.urls.append($0) })
+        let html = """
+        <meta http-equiv="refresh" content="0; url=https://example.invalid/">
+        <p><a href="notes/watering.md">Watering</a></p>
+        """
+        let block = HTMLBlockContent(html: html, fontName: "Helvetica", fontSize: 14, theme: .default)
+        let log = HeightLog()
+        let view = renderer.makeView(for: block) { log.heights.append($0) }
+        let webView = try #require(view as? WKWebView)
+        view.frame = NSRect(x: 0, y: 0, width: 400, height: 40)
+
+        let deadline = Date().addingTimeInterval(15)
+        while Date() < deadline, log.heights.isEmpty {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        // Give the refresh time to fire, were it allowed.
+        try await Task.sleep(nanoseconds: 300_000_000)
+        #expect(webView.url == NavigationPolicy.pageURL(for: folder))
+
+        _ = try await webView.evaluateJavaScript("document.querySelector('a').click(); 0", in: nil, contentWorld: .defaultClient)
+        while Date() < deadline, opened.urls.isEmpty {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        #expect(opened.urls.map(\.path) == ["/Garden/notes/watering.md"])
+        #expect(opened.urls.first?.isFileURL == true)
+        #expect(webView.url == NavigationPolicy.pageURL(for: folder))
+    }
+
     @Test("Narrowing the column reflows the text and reports a taller height")
     func reflowsWithWidth() async throws {
         let html = "<p>" + String(repeating: "Ferns and mosses like shade. ", count: 20) + "</p>"
@@ -216,4 +256,10 @@ struct WebKitHTMLBlockLiveTests {
 @MainActor
 private final class HeightLog {
     var heights: [CGFloat] = []
+}
+
+/// Links a block handed to its `openURL` handler, in order.
+@MainActor
+private final class OpenedLinks: Sendable {
+    var urls: [URL] = []
 }
