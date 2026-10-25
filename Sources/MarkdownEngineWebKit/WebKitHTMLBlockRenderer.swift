@@ -32,6 +32,11 @@ import UniformTypeIdentifiers
 /// The block's own JavaScript is off unless `allowsJavaScript` is `true`.
 /// Markdown files often come from elsewhere, so leave it off unless you trust
 /// the documents.
+///
+/// Remote content (images, frames, fonts and styles from the web) loads unless
+/// `allowsRemoteContent` is `false`. Loading it tells the server that the
+/// document was opened, so an app may want to ask first: with remote content
+/// off, `onBlockedRemoteContent` reports each URL a block was kept from loading.
 public final class WebKitHTMLBlockRenderer: HTMLBlockRenderer, @unchecked Sendable {
     /// Reads a resource a block refers to; `nil` when it can't be read.
     public typealias ResourceLoader = @Sendable (URL) -> Data?
@@ -40,6 +45,8 @@ public final class WebKitHTMLBlockRenderer: HTMLBlockRenderer, @unchecked Sendab
     private let schemeHandler: ResourceSchemeHandler
     private let stylesheet: String
     private let allowsJavaScript: Bool
+    private let allowsRemoteContent: Bool
+    private let onBlockedRemoteContent: (@MainActor @Sendable (URL) -> Void)?
     private let renderFingerprint: AnyHashable
     private let openURL: @MainActor @Sendable (URL) -> Void
 
@@ -55,6 +62,14 @@ public final class WebKitHTMLBlockRenderer: HTMLBlockRenderer, @unchecked Sendab
     ///   - stylesheet: CSS appended after the built-in styles, to tune how
     ///     blocks look.
     ///   - allowsJavaScript: Whether a block's own scripts run.
+    ///   - allowsRemoteContent: Whether a block may load anything from the web.
+    ///     `false` keeps every load to the block's own files and inline data,
+    ///     with a Content-Security-Policy in the block's page. Link clicks
+    ///     still go to `openURL`.
+    ///   - onBlockedRemoteContent: Called with each remote URL a block was kept
+    ///     from loading, once per URL per block, while `allowsRemoteContent`
+    ///     is `false`. As in CSP violation reports, some loads (frames) report
+    ///     only the URL's origin.
     ///   - fingerprint: Change it when what the renderer can read changes, for
     ///     example after the user grants access to a folder; the editor then
     ///     makes every view again so failed resources load.
@@ -65,6 +80,8 @@ public final class WebKitHTMLBlockRenderer: HTMLBlockRenderer, @unchecked Sendab
         resourceLoader: ResourceLoader? = nil,
         stylesheet: String = "",
         allowsJavaScript: Bool = false,
+        allowsRemoteContent: Bool = true,
+        onBlockedRemoteContent: (@MainActor @Sendable (URL) -> Void)? = nil,
         fingerprint: AnyHashable = 0,
         openURL: (@MainActor @Sendable (URL) -> Void)? = nil
     ) {
@@ -72,6 +89,8 @@ public final class WebKitHTMLBlockRenderer: HTMLBlockRenderer, @unchecked Sendab
         self.schemeHandler = ResourceSchemeHandler(load: resourceLoader ?? Self.folderReader(for: baseURL))
         self.stylesheet = stylesheet
         self.allowsJavaScript = allowsJavaScript
+        self.allowsRemoteContent = allowsRemoteContent
+        self.onBlockedRemoteContent = onBlockedRemoteContent
         self.renderFingerprint = fingerprint
         self.openURL = openURL ?? { NSWorkspace.shared.open($0) }
     }
@@ -95,9 +114,12 @@ public final class WebKitHTMLBlockRenderer: HTMLBlockRenderer, @unchecked Sendab
     public var isEnabled: Bool { true }
 
     /// Changes with the `fingerprint` passed at init, the base URL, the
-    /// stylesheet and the JavaScript switch.
+    /// stylesheet, and the JavaScript and remote-content switches.
     public func fingerprint() -> AnyHashable {
-        [renderFingerprint, AnyHashable(baseURL), AnyHashable(stylesheet), AnyHashable(allowsJavaScript)]
+        [
+            renderFingerprint, AnyHashable(baseURL), AnyHashable(stylesheet),
+            AnyHashable(allowsJavaScript), AnyHashable(allowsRemoteContent),
+        ]
     }
 
     /// Makes a web view showing `block`; see ``HTMLBlockRenderer/makeView(for:heightDidChange:)``.
@@ -117,10 +139,21 @@ public final class WebKitHTMLBlockRenderer: HTMLBlockRenderer, @unchecked Sendab
             forMainFrameOnly: true,
             in: .defaultClient
         ))
+        if !allowsRemoteContent {
+            // Violations fire while the body parses, so listen from the start.
+            let blockedHandler = BlockedContentMessageHandler(onBlockedRemoteContent)
+            controller.add(blockedHandler, contentWorld: .defaultClient, name: BlockedContentMessageHandler.name)
+            controller.addUserScript(WKUserScript(
+                source: HTMLBlockDocument.blockedContentScript,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: true,
+                in: .defaultClient
+            ))
+        }
 
         let navigation = NavigationPolicy(openURL: openURL, documentBaseURL: baseURL)
         let webView = HTMLBlockWebView(frame: .zero, configuration: configuration, navigation: navigation)
-        webView.load(block, stylesheet: stylesheet, baseURL: baseURL)
+        webView.load(block, page: pageOptions)
         return webView
     }
 
@@ -128,8 +161,19 @@ public final class WebKitHTMLBlockRenderer: HTMLBlockRenderer, @unchecked Sendab
     @MainActor
     public func update(_ view: NSView, for block: HTMLBlockContent) {
         guard let webView = view as? HTMLBlockWebView else { return }
-        webView.load(block, stylesheet: stylesheet, baseURL: baseURL)
+        webView.load(block, page: pageOptions)
     }
+
+    private var pageOptions: HTMLBlockPageOptions {
+        HTMLBlockPageOptions(stylesheet: stylesheet, baseURL: baseURL, allowsRemoteContent: allowsRemoteContent)
+    }
+}
+
+/// What a block's page is built with, beyond the block itself.
+struct HTMLBlockPageOptions {
+    var stylesheet = ""
+    var baseURL: URL?
+    var allowsRemoteContent = true
 }
 
 // MARK: - Web view
@@ -140,8 +184,7 @@ final class HTMLBlockWebView: WKWebView {
     // `navigationDelegate` is weak; the view keeps its policy alive.
     private let navigation: NavigationPolicy
     private var block: HTMLBlockContent?
-    private var stylesheet = ""
-    private var baseURL: URL?
+    private var page = HTMLBlockPageOptions()
 
     init(frame: NSRect, configuration: WKWebViewConfiguration, navigation: NavigationPolicy) {
         self.navigation = navigation
@@ -158,16 +201,16 @@ final class HTMLBlockWebView: WKWebView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
 
-    func load(_ block: HTMLBlockContent, stylesheet: String, baseURL: URL?) {
+    func load(_ block: HTMLBlockContent, page: HTMLBlockPageOptions) {
         self.block = block
-        self.stylesheet = stylesheet
-        self.baseURL = baseURL
-        let page = HTMLBlockDocument.page(
+        self.page = page
+        let html = HTMLBlockDocument.page(
             for: block,
             colors: HTMLBlockDocument.colorRules(for: block.theme, appearance: effectiveAppearance),
-            stylesheet: stylesheet
+            stylesheet: page.stylesheet,
+            allowsRemoteContent: page.allowsRemoteContent
         )
-        loadHTMLString(page, baseURL: ResourceSchemeHandler.pageBaseURL(for: baseURL))
+        loadHTMLString(html, baseURL: ResourceSchemeHandler.pageBaseURL(for: page.baseURL))
     }
 
     /// The block fits its content, so there is nothing to scroll inside it.
@@ -186,7 +229,7 @@ final class HTMLBlockWebView: WKWebView {
         // app's appearance. Until it has loaded there is no style to patch, so
         // load it again with the colors for this appearance.
         guard !isLoading else {
-            load(block, stylesheet: stylesheet, baseURL: baseURL)
+            load(block, page: page)
             return
         }
         let rules = HTMLBlockDocument.colorRules(for: block.theme, appearance: effectiveAppearance)
@@ -235,11 +278,47 @@ enum HTMLBlockDocument {
     })();
     """
 
-    static func page(for block: HTMLBlockContent, colors: String, stylesheet: String) -> String {
-        """
+    /// Keeps every load to the block's own files and inline data. It comes
+    /// first in the head, so nothing in the block can load before it applies,
+    /// and a policy only ever narrows, so the block can't widen it.
+    static let localOnlyPolicy = [
+        "default-src 'none'",
+        "img-src \(ResourceSchemeHandler.scheme): data: blob:",
+        "media-src \(ResourceSchemeHandler.scheme): data: blob:",
+        "font-src \(ResourceSchemeHandler.scheme): data:",
+        "style-src 'unsafe-inline' \(ResourceSchemeHandler.scheme):",
+        "script-src 'unsafe-inline' \(ResourceSchemeHandler.scheme):",
+        "frame-src \(ResourceSchemeHandler.scheme):",
+        "connect-src \(ResourceSchemeHandler.scheme):",
+    ].joined(separator: "; ")
+
+    /// Reports each remote URL the page's policy blocked, once. Runs at
+    /// document start: images in the block are blocked while it parses.
+    static let blockedContentScript = """
+    (() => {
+      const reported = new Set();
+      document.addEventListener('securitypolicyviolation', (event) => {
+        const uri = event.blockedURI;
+        if (!/^https?:/i.test(uri) || reported.has(uri)) return;
+        reported.add(uri);
+        window.webkit.messageHandlers.\(BlockedContentMessageHandler.name).postMessage(uri);
+      });
+    })();
+    """
+
+    static func page(
+        for block: HTMLBlockContent,
+        colors: String,
+        stylesheet: String,
+        allowsRemoteContent: Bool = true
+    ) -> String {
+        let policy = allowsRemoteContent
+            ? ""
+            : "<meta http-equiv=\"Content-Security-Policy\" content=\"\(localOnlyPolicy)\">\n"
+        return """
         <!doctype html>
         <html><head>
-        <meta charset="utf-8">
+        \(policy)<meta charset="utf-8">
         <style id="\(colorStyleID)">\(colors)</style>
         <style>
         :root { color-scheme: light dark; }
@@ -320,6 +399,21 @@ final class HeightMessageHandler: NSObject, WKScriptMessageHandler {
         guard let number = message.body as? NSNumber else { return }
         let height = CGFloat(number.doubleValue)
         MainActor.assumeIsolated { heightDidChange(height) }
+    }
+}
+
+/// Relays the remote URLs a block's content policy blocked.
+final class BlockedContentMessageHandler: NSObject, WKScriptMessageHandler {
+    static let name = "markdownEngineBlocked"
+    private let onBlocked: (@MainActor @Sendable (URL) -> Void)?
+
+    init(_ onBlocked: (@MainActor @Sendable (URL) -> Void)?) {
+        self.onBlocked = onBlocked
+    }
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let string = message.body as? String, let url = URL(string: string) else { return }
+        MainActor.assumeIsolated { onBlocked?(url) }
     }
 }
 

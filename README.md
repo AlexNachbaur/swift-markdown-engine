@@ -225,6 +225,11 @@ changes, for example after the user grants access to a folder, pass a new
 `openURL:`, which defaults to `NSWorkspace`. A block's own JavaScript is
 off unless you pass `allowsJavaScript: true`.
 
+Remote content (images and frames from the web) loads by default. Loading
+it tells the server that the document was opened, so you may want to ask
+first: `allowsRemoteContent: false` keeps every load local, and
+`onBlockedRemoteContent:` reports what a block was kept from loading.
+
 Need a different renderer? Implement `HTMLBlockRenderer`: return a view
 from `makeView(for:heightDidChange:)` and call `heightDidChange` with the
 content's height whenever it changes. The engine owns the view's frame.

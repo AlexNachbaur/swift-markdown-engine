@@ -127,6 +127,18 @@ struct WebKitHTMLBlockPageTests {
         #expect(page.contains("display: flow-root"))
     }
 
+    @Test("With remote content off, the page's first element is a local-only policy")
+    func localOnlyPolicy() {
+        let block = HTMLBlockContent(html: "<p>moss</p>", fontName: "Helvetica", fontSize: 15, theme: .default)
+        let open = HTMLBlockDocument.page(for: block, colors: "", stylesheet: "")
+        let closed = HTMLBlockDocument.page(for: block, colors: "", stylesheet: "", allowsRemoteContent: false)
+        #expect(!open.contains("Content-Security-Policy"))
+        let head = closed.components(separatedBy: "<head>").last ?? ""
+        #expect(head.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("<meta http-equiv=\"Content-Security-Policy\""))
+        #expect(HTMLBlockDocument.localOnlyPolicy.hasPrefix("default-src 'none'"))
+        #expect(!HTMLBlockDocument.localOnlyPolicy.contains("http"))
+    }
+
     @Test("The fingerprint follows what the renderer draws with")
     func fingerprints() {
         let folder = URL(fileURLWithPath: "/Garden", isDirectory: true)
@@ -134,6 +146,10 @@ struct WebKitHTMLBlockPageTests {
         #expect(first.fingerprint() == WebKitHTMLBlockRenderer(baseURL: folder, fingerprint: 1).fingerprint())
         #expect(first.fingerprint() != WebKitHTMLBlockRenderer(baseURL: folder, fingerprint: 2).fingerprint())
         #expect(first.fingerprint() != WebKitHTMLBlockRenderer(baseURL: nil, fingerprint: 1).fingerprint())
+        #expect(
+            first.fingerprint()
+                != WebKitHTMLBlockRenderer(baseURL: folder, allowsRemoteContent: false, fingerprint: 1).fingerprint()
+        )
         #expect(first.isEnabled)
     }
 }
@@ -262,6 +278,34 @@ struct WebKitHTMLBlockLiveTests {
         #expect(opened.urls.map(\.path) == ["/Garden/notes/watering.md"])
         #expect(opened.urls.first?.isFileURL == true)
         #expect(webView.url == NavigationPolicy.pageURL(for: folder))
+    }
+
+    @Test("With remote content off, remote loads are blocked and reported while local images load")
+    func blocksRemoteContent() async throws {
+        let image = try Self.png(width: 40, height: 90)
+        let folder = URL(fileURLWithPath: "/Garden", isDirectory: true)
+        let blocked = OpenedLinks()
+        let renderer = WebKitHTMLBlockRenderer(
+            baseURL: folder,
+            resourceLoader: { $0.lastPathComponent == "fern.png" ? image : nil },
+            allowsRemoteContent: false,
+            onBlockedRemoteContent: { blocked.urls.append($0) }
+        )
+        let html = """
+        <p><img src="https://example.invalid/pixel.png" alt=""> <img src="fern.png"></p>
+        <iframe src="https://example.invalid/embed" width="10" height="10"></iframe>
+        """
+        let heights = try await render(html, renderer: renderer) { $0 >= 90 }
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline, blocked.urls.count < 2 {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        #expect((heights.last ?? 0) >= 90)
+        // A blocked frame is reported by its origin only, as CSP reports do.
+        #expect(Set(blocked.urls.map(\.absoluteString)) == [
+            "https://example.invalid/pixel.png",
+            "https://example.invalid",
+        ])
     }
 
     @Test("Content sized by the viewport doesn't grow the block without end")
