@@ -315,22 +315,26 @@ enum HTMLBlockDocument {
     ///
     /// The view is then sized to that height, which changes the viewport, so
     /// content sized by the viewport (`height: 100vh`) would grow with every
-    /// report it caused. Growth that comes with the viewport growing is
-    /// therefore not reported, and becomes the baseline later changes (an
-    /// image loading) are measured from.
+    /// report it caused. So when the viewport has just grown to the height
+    /// last reported, growth at least as large isn't reported; it becomes the
+    /// baseline later changes (an image loading) are measured from. Growth
+    /// that comes with any other resize is real and is reported.
     static let heightScript = """
     (() => {
       let lastHeight = -1;
+      let lastReported = -1;
       let lastViewport = window.innerHeight;
       const post = () => {
         const height = Math.ceil(document.body.getBoundingClientRect().height);
         const viewport = window.innerHeight;
         const viewportGrowth = viewport - lastViewport;
-        const followsViewport = lastHeight >= 0 && viewportGrowth > 0 && height - lastHeight >= viewportGrowth - 1;
+        const grewToReport = viewportGrowth > 0 && Math.abs(viewport - lastReported) <= 1;
+        const followsViewport = grewToReport && height - lastHeight >= viewportGrowth - 1;
         const changed = height !== lastHeight;
         lastViewport = viewport;
         lastHeight = height;
         if (!changed || followsViewport) return;
+        lastReported = height;
         window.webkit.messageHandlers.\(HeightMessageHandler.name).postMessage(height);
       };
       new ResizeObserver(post).observe(document.body);
