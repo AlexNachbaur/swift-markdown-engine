@@ -227,8 +227,9 @@ off unless you pass `allowsJavaScript: true`.
 
 Remote content (images and frames from the web) loads by default. Loading
 it tells the server that the document was opened, so you may want to ask
-first: `allowsRemoteContent: false` keeps every load local, and
-`onBlockedRemoteContent:` reports what a block was kept from loading.
+first: `allowsRemoteContent: false` blocks every web request a block or a
+local page in its frames makes, and `onBlockedRemoteContent:` reports what
+was blocked (all but a few kinds of load, such as `<object>`).
 
 Need a different renderer? Implement `HTMLBlockRenderer`: return a view
 from `makeView(for:heightDidChange:)` and call `heightDidChange` with the

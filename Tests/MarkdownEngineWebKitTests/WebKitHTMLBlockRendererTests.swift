@@ -4,6 +4,7 @@
 //
 
 import AppKit
+import Network
 import Testing
 import WebKit
 import MarkdownEngine
@@ -308,6 +309,38 @@ struct WebKitHTMLBlockLiveTests {
         ])
     }
 
+    @Test(
+        "Blocking reaches what the page's policy doesn't: preconnect, and a local page in a frame",
+        arguments: [false, true]
+    )
+    func blockingHasNoGaps(allowsRemoteContent: Bool) async throws {
+        let listener = try await LoopbackListener.start()
+        defer { listener.stop() }
+        let origin = "http://127.0.0.1:\(listener.port)"
+        let framePage = Data("<p><img src=\"\(origin)/frame-image.png\"></p>".utf8)
+        let blocked = OpenedLinks()
+        let renderer = WebKitHTMLBlockRenderer(
+            baseURL: URL(fileURLWithPath: "/Garden", isDirectory: true),
+            resourceLoader: { $0.lastPathComponent == "frame.html" ? framePage : nil },
+            allowsRemoteContent: allowsRemoteContent,
+            onBlockedRemoteContent: { blocked.urls.append($0) }
+        )
+        let html = """
+        <link rel="preconnect" href="\(origin)/">
+        <iframe src="frame.html" width="100" height="40"></iframe>
+        """
+        _ = try await render(html, renderer: renderer) { $0 > 0 }
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+
+        if allowsRemoteContent {
+            // The control: the listener does hear what isn't blocked.
+            #expect(listener.connections > 0)
+        } else {
+            #expect(listener.connections == 0)
+            #expect(blocked.urls.map(\.absoluteString).contains("\(origin)/frame-image.png"))
+        }
+    }
+
     @Test("Content sized by the viewport doesn't grow the block without end")
     func viewportUnitsSettle() async throws {
         _ = NSApplication.shared
@@ -349,6 +382,62 @@ struct WebKitHTMLBlockLiveTests {
 @MainActor
 private final class HeightLog {
     var heights: [CGFloat] = []
+}
+
+/// A TCP listener on the loopback address that counts the connections it
+/// gets, standing in for a remote server.
+private final class LoopbackListener: @unchecked Sendable {
+    private let listener: NWListener
+    private let lock = NSLock()
+    private var count = 0
+
+    let port: UInt16
+
+    private init(listener: NWListener, port: UInt16) {
+        self.listener = listener
+        self.port = port
+    }
+
+    var connections: Int { lock.lock(); defer { lock.unlock() }; return count }
+
+    static func start() async throws -> LoopbackListener {
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: .any)
+        let listener = try NWListener(using: parameters)
+        let queue = DispatchQueue(label: "LoopbackListener")
+        let port: UInt16 = try await withCheckedThrowingContinuation { continuation in
+            let resumed = NSLock()
+            var done = false
+            listener.stateUpdateHandler = { state in
+                resumed.lock(); defer { resumed.unlock() }
+                guard !done else { return }
+                switch state {
+                case .ready:
+                    done = true
+                    continuation.resume(returning: listener.port?.rawValue ?? 0)
+                case .failed(let error):
+                    done = true
+                    continuation.resume(throwing: error)
+                default:
+                    break
+                }
+            }
+            listener.newConnectionHandler = { _ in }
+            listener.start(queue: queue)
+        }
+        let result = LoopbackListener(listener: listener, port: port)
+        listener.newConnectionHandler = { [weak result] connection in
+            result?.recordConnection()
+            connection.cancel()
+        }
+        return result
+    }
+
+    private func recordConnection() {
+        lock.lock(); count += 1; lock.unlock()
+    }
+
+    func stop() { listener.cancel() }
 }
 
 /// Lets a height callback reach the view it was made for.

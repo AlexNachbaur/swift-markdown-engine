@@ -63,13 +63,16 @@ public final class WebKitHTMLBlockRenderer: HTMLBlockRenderer, @unchecked Sendab
     ///     blocks look.
     ///   - allowsJavaScript: Whether a block's own scripts run.
     ///   - allowsRemoteContent: Whether a block may load anything from the web.
-    ///     `false` keeps every load to the block's own files and inline data,
-    ///     with a Content-Security-Policy in the block's page. Link clicks
-    ///     still go to `openURL`.
+    ///     `false` keeps every load to the block's own files and inline data:
+    ///     a content rule list blocks every `http` and `https` request, and a
+    ///     Content-Security-Policy on the block's page and on every local file
+    ///     it loads reports what was blocked. DNS prefetching is off. Link
+    ///     clicks still go to `openURL`.
     ///   - onBlockedRemoteContent: Called with each remote URL a block was kept
-    ///     from loading, once per URL per block, while `allowsRemoteContent`
-    ///     is `false`. As in CSP violation reports, some loads (frames) report
-    ///     only the URL's origin.
+    ///     from loading, once per URL per page, while `allowsRemoteContent` is
+    ///     `false`. As in CSP violation reports, some loads (frames) report
+    ///     only the URL's origin, and a few (`<object>`, `<embed>`, prefetch
+    ///     links) are blocked without a report.
     ///   - fingerprint: Change it when what the renderer can read changes, for
     ///     example after the user grants access to a folder; the editor then
     ///     makes every view again so failed resources load.
@@ -86,7 +89,10 @@ public final class WebKitHTMLBlockRenderer: HTMLBlockRenderer, @unchecked Sendab
         openURL: (@MainActor @Sendable (URL) -> Void)? = nil
     ) {
         self.baseURL = baseURL
-        self.schemeHandler = ResourceSchemeHandler(load: resourceLoader ?? Self.folderReader(for: baseURL))
+        self.schemeHandler = ResourceSchemeHandler(
+            load: resourceLoader ?? Self.folderReader(for: baseURL),
+            contentSecurityPolicy: allowsRemoteContent ? nil : HTMLBlockDocument.localOnlyPolicy
+        )
         self.stylesheet = stylesheet
         self.allowsJavaScript = allowsJavaScript
         self.allowsRemoteContent = allowsRemoteContent
@@ -140,20 +146,33 @@ public final class WebKitHTMLBlockRenderer: HTMLBlockRenderer, @unchecked Sendab
             in: .defaultClient
         ))
         if !allowsRemoteContent {
-            // Violations fire while the body parses, so listen from the start.
+            // Violations fire while the body parses, so listen from the start,
+            // in frames too: a local page in a frame carries the same policy.
             let blockedHandler = BlockedContentMessageHandler(onBlockedRemoteContent)
             controller.add(blockedHandler, contentWorld: .defaultClient, name: BlockedContentMessageHandler.name)
             controller.addUserScript(WKUserScript(
                 source: HTMLBlockDocument.blockedContentScript,
                 injectionTime: .atDocumentStart,
-                forMainFrameOnly: true,
+                forMainFrameOnly: false,
                 in: .defaultClient
             ))
         }
 
         let navigation = NavigationPolicy(openURL: openURL, documentBaseURL: baseURL)
         let webView = HTMLBlockWebView(frame: .zero, configuration: configuration, navigation: navigation)
-        webView.load(block, page: pageOptions)
+        let page = pageOptions
+        if allowsRemoteContent {
+            webView.load(block, page: page)
+        } else {
+            // The policy in the page doesn't govern everything (`preconnect`
+            // opens a connection regardless), so a content rule list blocks
+            // every web request as well. It compiles once, asynchronously;
+            // the page waits for it.
+            RemoteContentRuleList.whenReady { ruleList in
+                if let ruleList { controller.add(ruleList) }
+                webView.load(block, page: page)
+            }
+        }
         return webView
     }
 
@@ -166,6 +185,49 @@ public final class WebKitHTMLBlockRenderer: HTMLBlockRenderer, @unchecked Sendab
 
     private var pageOptions: HTMLBlockPageOptions {
         HTMLBlockPageOptions(stylesheet: stylesheet, baseURL: baseURL, allowsRemoteContent: allowsRemoteContent)
+    }
+}
+
+/// A content rule list blocking every `http` and `https` request, compiled
+/// once for the process. If compiling fails, blocks still get the page's
+/// Content-Security-Policy.
+@MainActor
+enum RemoteContentRuleList {
+    static let identifier = "MarkdownEngineWebKit.blockRemoteContent"
+    static let source = #"[{"trigger":{"url-filter":"^https?://"},"action":{"type":"block"}}]"#
+
+    private enum State {
+        case idle
+        case compiling([@MainActor (WKContentRuleList?) -> Void])
+        case ready(WKContentRuleList?)
+    }
+
+    private static var state = State.idle
+
+    /// Calls `body` with the compiled list (or `nil` if it couldn't be
+    /// compiled), right away once it is ready.
+    static func whenReady(_ body: @escaping @MainActor (WKContentRuleList?) -> Void) {
+        switch state {
+        case .ready(let ruleList):
+            body(ruleList)
+        case .compiling(var waiting):
+            waiting.append(body)
+            state = .compiling(waiting)
+        case .idle:
+            state = .compiling([body])
+            WKContentRuleListStore.default().compileContentRuleList(
+                forIdentifier: identifier,
+                encodedContentRuleList: source
+            ) { ruleList, _ in
+                Task { @MainActor in finish(with: ruleList) }
+            }
+        }
+    }
+
+    private static func finish(with ruleList: WKContentRuleList?) {
+        guard case .compiling(let waiting) = state else { return }
+        state = .ready(ruleList)
+        waiting.forEach { $0(ruleList) }
     }
 }
 
@@ -312,9 +374,14 @@ enum HTMLBlockDocument {
         stylesheet: String,
         allowsRemoteContent: Bool = true
     ) -> String {
+        // DNS prefetching isn't governed by the policy; switch it off too.
         let policy = allowsRemoteContent
             ? ""
-            : "<meta http-equiv=\"Content-Security-Policy\" content=\"\(localOnlyPolicy)\">\n"
+            : """
+            <meta http-equiv="Content-Security-Policy" content="\(localOnlyPolicy)">
+            <meta http-equiv="x-dns-prefetch-control" content="off">
+
+            """
         return """
         <!doctype html>
         <html><head>
@@ -483,11 +550,15 @@ final class ResourceSchemeHandler: NSObject, WKURLSchemeHandler, @unchecked Send
     private static let host = "file"
 
     private let load: WebKitHTMLBlockRenderer.ResourceLoader
+    /// Sent with every response, so a local page shown in a frame is held to
+    /// the same policy as the block's own page.
+    private let contentSecurityPolicy: String?
     /// Tasks WebKit hasn't stopped; a stopped task must not be answered.
     @MainActor private var activeTasks: Set<ObjectIdentifier> = []
 
-    init(load: @escaping WebKitHTMLBlockRenderer.ResourceLoader) {
+    init(load: @escaping WebKitHTMLBlockRenderer.ResourceLoader, contentSecurityPolicy: String? = nil) {
         self.load = load
+        self.contentSecurityPolicy = contentSecurityPolicy
     }
 
     /// The URL a block's page loads from. A file base becomes a folder URL in
@@ -552,11 +623,13 @@ final class ResourceSchemeHandler: NSObject, WKURLSchemeHandler, @unchecked Send
             return
         }
         let mimeType = Self.mimeType(for: file)
+        var headers = ["Content-Type": mimeType, "Content-Length": String(data.count)]
+        if let contentSecurityPolicy { headers["Content-Security-Policy"] = contentSecurityPolicy }
         let response = HTTPURLResponse(
             url: url,
             statusCode: 200,
             httpVersion: "HTTP/1.1",
-            headerFields: ["Content-Type": mimeType, "Content-Length": String(data.count)]
+            headerFields: headers
         ) ?? URLResponse(url: url, mimeType: mimeType, expectedContentLength: data.count, textEncodingName: nil)
         task.didReceive(response)
         task.didReceive(data)
