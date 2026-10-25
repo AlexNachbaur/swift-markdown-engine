@@ -175,6 +175,9 @@ struct HTMLBlockHostingTests {
     }
 
     private func afterParagraphY(_ editor: Editor) -> CGFloat {
+        // Hosting settles layout only through the last block; lay out the
+        // rest, as scrolling it into view would.
+        if let tlm = editor.textView.textLayoutManager { tlm.ensureLayout(for: tlm.documentRange) }
         let ns = editor.textView.string as NSString
         let range = ns.range(of: "After the pictures.")
         let container = editor.bridge.firstTextContainer!
@@ -252,6 +255,8 @@ struct HTMLBlockHostingTests {
 
         textView.setSelectedRange(NSRange(location: blockStart + 3, length: 0))
         #expect(host.isHidden)
+        // Hidden, it must not take the clicks meant for the source under it.
+        #expect(host.hitTest(NSPoint(x: host.frame.midX, y: host.frame.midY)) == nil)
         var tagged = false
         textView.textStorage?.enumerateAttribute(.htmlBlockAnchor, in: NSRange(location: 0, length: textView.textStorage?.length ?? 0)) { value, _, _ in
             if value != nil { tagged = true }
@@ -296,6 +301,32 @@ struct HTMLBlockHostingTests {
         for _ in 0..<40 { editor.textView.updateHTMLBlockViews() }
         #expect(editor.textView.htmlBlockViews.isEmpty)
         #expect(host.superview == nil)
+    }
+
+    @Test("A theme change reaches existing views through update, without remaking them")
+    func themeChangeUpdatesViews() throws {
+        let renderer = RecordingHTMLBlockRenderer()
+        let editor = try makeEditor(Self.document, renderer: renderer)
+        editor.textView.updateHTMLBlockViews()
+        #expect(renderer.updated.isEmpty)
+
+        editor.textView.configuration.theme.link = .systemPink
+        editor.textView.updateHTMLBlockViews()
+        #expect(renderer.updated.count == 1)
+        #expect(renderer.made.count == 1)
+        editor.textView.updateHTMLBlockViews()
+        #expect(renderer.updated.count == 1)
+    }
+
+    @Test("Heights for HTML no longer in the document are forgotten")
+    func staleHeightsPruned() throws {
+        let renderer = RecordingHTMLBlockRenderer()
+        let editor = try makeEditor(Self.document, renderer: renderer)
+        editor.bridge.htmlBlockHeights["<p>an older edit</p>"] = 50
+        editor.bridge.htmlBlockHeights[Self.html] = 120
+        editor.textView.updateHTMLBlockViews()
+        #expect(editor.bridge.htmlBlockHeights["<p>an older edit</p>"] == nil)
+        #expect(editor.bridge.htmlBlockHeights[Self.html] == 120)
     }
 
     @Test("Identical blocks get a view each")

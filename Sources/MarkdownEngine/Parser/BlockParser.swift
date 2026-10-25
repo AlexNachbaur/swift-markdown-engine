@@ -175,9 +175,12 @@ enum BlockParser {
 
     /// An HTML-block opener or end marker whose partner can be far away:
     /// `<!`, `<?`, `</`, `<p…`/`<s…`/`<t…` (the `<pre>`, `<script>`, `<style>`
-    /// and `<textarea>` openers), `-->`, `?>` and `]]>`. Types 6 and 7 end at
-    /// a blank line and need no entry here. Deliberately loose: a false hit
-    /// only costs a full reparse.
+    /// and `<textarea>` openers), and any `>`: a declaration (`<!DOCTYPE …`,
+    /// type 4) ends at the first line holding one, so a `>` typed far below an
+    /// unclosed declaration closes it. That covers `-->`, `?>` and `]]>` too.
+    /// Types 6 and 7 end at a blank line and need no entry here. Deliberately
+    /// loose: a false hit only costs a full reparse, and only while a renderer
+    /// has HTML blocks on.
     private static func isHTMLBlockDelimiter(_ buf: [unichar], at i: Int, end: Int) -> Bool {
         let lt: unichar = 0x3C, gt: unichar = 0x3E
         switch buf[i] {
@@ -189,10 +192,7 @@ enum BlockParser {
             default: return false
             }
         case gt:
-            guard i >= 1 else { return false }
-            if buf[i - 1] == 0x3F { return true }                                 // ?>
-            return i >= 2 && ((buf[i - 1] == 0x2D && buf[i - 2] == 0x2D)          // -->
-                || (buf[i - 1] == 0x5D && buf[i - 2] == 0x5D))                    // ]]>
+            return true
         default:
             return false
         }

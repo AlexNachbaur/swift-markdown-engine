@@ -47,8 +47,11 @@ public final class WebKitHTMLBlockRenderer: HTMLBlockRenderer, @unchecked Sendab
     ///   - baseURL: What relative references resolve against, usually the
     ///     folder holding the document. `nil` leaves them unresolved.
     ///   - resourceLoader: Reads a file a block refers to, given its resolved
-    ///     file URL. Runs off the main thread. `nil` reads the file directly,
-    ///     which in a sandboxed app works only where the app already has access.
+    ///     file URL. Runs off the main thread. It is asked for every file a block
+    ///     names, including ones outside `baseURL` (`../`) and, when scripts
+    ///     run, ones a script fetches, so it decides what a document may read.
+    ///     `nil` reads files directly, only inside `baseURL`'s folder; in a
+    ///     sandboxed app that works only where the app already has access.
     ///   - stylesheet: CSS appended after the built-in styles, to tune how
     ///     blocks look.
     ///   - allowsJavaScript: Whether a block's own scripts run.
@@ -66,19 +69,38 @@ public final class WebKitHTMLBlockRenderer: HTMLBlockRenderer, @unchecked Sendab
         openURL: (@MainActor @Sendable (URL) -> Void)? = nil
     ) {
         self.baseURL = baseURL
-        self.schemeHandler = ResourceSchemeHandler(load: resourceLoader ?? { try? Data(contentsOf: $0) })
+        self.schemeHandler = ResourceSchemeHandler(load: resourceLoader ?? Self.folderReader(for: baseURL))
         self.stylesheet = stylesheet
         self.allowsJavaScript = allowsJavaScript
         self.renderFingerprint = fingerprint
         self.openURL = openURL ?? { NSWorkspace.shared.open($0) }
     }
 
+    /// The default loader: reads a file only when it lies inside `baseURL`'s
+    /// folder, so a document can't name its way to files elsewhere.
+    static func folderReader(for baseURL: URL?) -> ResourceLoader {
+        let folder = baseURL.flatMap { $0.isFileURL ? $0.standardizedFileURL.path : nil }
+        return { file in
+            guard let folder, isFile(file, inside: folder) else { return nil }
+            return try? Data(contentsOf: file)
+        }
+    }
+
+    static func isFile(_ file: URL, inside folder: String) -> Bool {
+        let prefix = folder.hasSuffix("/") ? folder : folder + "/"
+        return file.standardizedFileURL.path.hasPrefix(prefix)
+    }
+
+    /// Always `true`: registering this renderer is what turns HTML blocks on.
     public var isEnabled: Bool { true }
 
+    /// Changes with the `fingerprint` passed at init, the base URL, the
+    /// stylesheet and the JavaScript switch.
     public func fingerprint() -> AnyHashable {
         [renderFingerprint, AnyHashable(baseURL), AnyHashable(stylesheet), AnyHashable(allowsJavaScript)]
     }
 
+    /// Makes a web view showing `block`; see ``HTMLBlockRenderer/makeView(for:heightDidChange:)``.
     @MainActor
     public func makeView(for block: HTMLBlockContent, heightDidChange: @escaping @MainActor (CGFloat) -> Void) -> NSView {
         let configuration = WKWebViewConfiguration()
@@ -102,6 +124,7 @@ public final class WebKitHTMLBlockRenderer: HTMLBlockRenderer, @unchecked Sendab
         return webView
     }
 
+    /// Reloads `view` with `block`'s HTML, font and theme.
     @MainActor
     public func update(_ view: NSView, for block: HTMLBlockContent) {
         guard let webView = view as? HTMLBlockWebView else { return }
@@ -117,6 +140,8 @@ final class HTMLBlockWebView: WKWebView {
     // `navigationDelegate` is weak; the view keeps its policy alive.
     private let navigation: NavigationPolicy
     private var block: HTMLBlockContent?
+    private var stylesheet = ""
+    private var baseURL: URL?
 
     init(frame: NSRect, configuration: WKWebViewConfiguration, navigation: NavigationPolicy) {
         self.navigation = navigation
@@ -135,6 +160,8 @@ final class HTMLBlockWebView: WKWebView {
 
     func load(_ block: HTMLBlockContent, stylesheet: String, baseURL: URL?) {
         self.block = block
+        self.stylesheet = stylesheet
+        self.baseURL = baseURL
         let page = HTMLBlockDocument.page(
             for: block,
             colors: HTMLBlockDocument.colorRules(for: block.theme, appearance: effectiveAppearance),
@@ -155,8 +182,18 @@ final class HTMLBlockWebView: WKWebView {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         guard let block else { return }
+        // The page is first loaded before the view joins the editor, with the
+        // app's appearance. Until it has loaded there is no style to patch, so
+        // load it again with the colors for this appearance.
+        guard !isLoading else {
+            load(block, stylesheet: stylesheet, baseURL: baseURL)
+            return
+        }
         let rules = HTMLBlockDocument.colorRules(for: block.theme, appearance: effectiveAppearance)
-        let script = "document.getElementById('\(HTMLBlockDocument.colorStyleID)').textContent = \(HTMLBlockDocument.javaScriptString(rules));"
+        let script = """
+            const style = document.getElementById('\(HTMLBlockDocument.colorStyleID)');
+            if (style) { style.textContent = \(HTMLBlockDocument.javaScriptString(rules)); }
+            """
         evaluateJavaScript(script, in: nil, in: .defaultClient, completionHandler: nil)
     }
 }
@@ -170,11 +207,29 @@ enum HTMLBlockDocument {
     /// Reports the body's height now, on load, and whenever it changes. The
     /// body contains its children's margins (`flow-root`), so its height is
     /// the content's.
+    ///
+    /// The view is then sized to that height, which changes the viewport, so
+    /// content sized by the viewport (`height: 100vh`) would grow with every
+    /// report it caused. Growth that comes with the viewport growing is
+    /// therefore not reported, and becomes the baseline later changes (an
+    /// image loading) are measured from.
     static let heightScript = """
     (() => {
-      const post = () => window.webkit.messageHandlers.\(HeightMessageHandler.name)
-        .postMessage(Math.ceil(document.body.getBoundingClientRect().height));
+      let lastHeight = -1;
+      let lastViewport = window.innerHeight;
+      const post = () => {
+        const height = Math.ceil(document.body.getBoundingClientRect().height);
+        const viewport = window.innerHeight;
+        const viewportGrowth = viewport - lastViewport;
+        const followsViewport = lastHeight >= 0 && viewportGrowth > 0 && height - lastHeight >= viewportGrowth - 1;
+        const changed = height !== lastHeight;
+        lastViewport = viewport;
+        lastHeight = height;
+        if (!changed || followsViewport) return;
+        window.webkit.messageHandlers.\(HeightMessageHandler.name).postMessage(height);
+      };
       new ResizeObserver(post).observe(document.body);
+      window.addEventListener('resize', post);
       window.addEventListener('load', post);
       post();
     })();

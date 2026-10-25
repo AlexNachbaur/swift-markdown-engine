@@ -70,6 +70,28 @@ struct WebKitHTMLBlockPageTests {
         #expect(NavigationPolicy.pageURL(for: nil).absoluteString == "about:blank")
     }
 
+    @Test("The default loader reads only inside the base folder")
+    func defaultLoaderStaysInFolder() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("markdown-engine-\(UUID().uuidString)", isDirectory: true)
+        let inside = folder.appendingPathComponent("beds/fern.txt")
+        try FileManager.default.createDirectory(at: inside.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("fern".utf8).write(to: inside)
+        let outside = folder.deletingLastPathComponent().appendingPathComponent("\(folder.lastPathComponent)-sibling.txt")
+        try Data("sibling".utf8).write(to: outside)
+        defer {
+            try? FileManager.default.removeItem(at: folder)
+            try? FileManager.default.removeItem(at: outside)
+        }
+
+        let read = WebKitHTMLBlockRenderer.folderReader(for: folder)
+        #expect(read(inside) == Data("fern".utf8))
+        #expect(read(folder.appendingPathComponent("beds/../beds/fern.txt")) == Data("fern".utf8))
+        #expect(read(folder.appendingPathComponent("../\(outside.lastPathComponent)")) == nil)
+        #expect(read(outside) == nil)
+        #expect(WebKitHTMLBlockRenderer.folderReader(for: nil)(inside) == nil)
+    }
+
     @Test("MIME types come from the file extension")
     func mimeTypes() {
         #expect(ResourceSchemeHandler.mimeType(for: URL(fileURLWithPath: "/a/fern.png")) == "image/png")
@@ -242,6 +264,33 @@ struct WebKitHTMLBlockLiveTests {
         #expect(webView.url == NavigationPolicy.pageURL(for: folder))
     }
 
+    @Test("Content sized by the viewport doesn't grow the block without end")
+    func viewportUnitsSettle() async throws {
+        _ = NSApplication.shared
+        let log = HeightLog()
+        let block = HTMLBlockContent(
+            html: "<div style=\"height: 100vh\"></div><p>moss</p>",
+            fontName: "Helvetica", fontSize: 14, theme: .default
+        )
+        let holder = ViewHolder()
+        // Size the view to every report, as the editor does.
+        let view = WebKitHTMLBlockRenderer().makeView(for: block) { height in
+            log.heights.append(height)
+            holder.view?.setFrameSize(NSSize(width: 400, height: height))
+        }
+        holder.view = view
+        view.frame = NSRect(x: 0, y: 0, width: 400, height: 20)
+
+        let deadline = Date().addingTimeInterval(15)
+        while Date() < deadline, log.heights.isEmpty {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        // Give a feedback loop time to show itself.
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+        #expect(!log.heights.isEmpty)
+        #expect(log.heights.count <= 3, "heights kept growing: \(log.heights)")
+    }
+
     @Test("Narrowing the column reflows the text and reports a taller height")
     func reflowsWithWidth() async throws {
         let html = "<p>" + String(repeating: "Ferns and mosses like shade. ", count: 20) + "</p>"
@@ -256,6 +305,12 @@ struct WebKitHTMLBlockLiveTests {
 @MainActor
 private final class HeightLog {
     var heights: [CGFloat] = []
+}
+
+/// Lets a height callback reach the view it was made for.
+@MainActor
+private final class ViewHolder {
+    weak var view: NSView?
 }
 
 /// Links a block handed to its `openURL` handler, in order.

@@ -24,21 +24,23 @@ import AppKit
 /// the document.
 final class HTMLBlockHostView: NSView {
     let key: String
+    /// The block's HTML, which keys its reported height.
+    let html: String
     /// Document index of the block's anchor; a click in edit mode moves the caret here.
     var anchorTextLocation: Int
     weak var ownerTextView: NativeTextView?
     private(set) var content: NSView?
-    var fontName: String
-    var fontSize: CGFloat
+    /// What the content was last drawn with; a change calls the renderer's `update`.
+    var drawnWith: HTMLBlockDrawingState
     /// The reconcile generation in which this block was last rendered.
     var lastSeenGeneration: Int
 
-    init(key: String, anchorLocation: Int, ownerTextView: NativeTextView, fontName: String, fontSize: CGFloat, generation: Int) {
+    init(key: String, html: String, anchorLocation: Int, ownerTextView: NativeTextView, drawnWith: HTMLBlockDrawingState, generation: Int) {
         self.key = key
+        self.html = html
         self.anchorTextLocation = anchorLocation
         self.ownerTextView = ownerTextView
-        self.fontName = fontName
-        self.fontSize = fontSize
+        self.drawnWith = drawnWith
         self.lastSeenGeneration = generation
         super.init(frame: .zero)
     }
@@ -56,6 +58,9 @@ final class HTMLBlockHostView: NSView {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
+        // Hidden while the caret is in the block (or after it was edited away):
+        // clicks belong to the source text under it.
+        guard !isHidden else { return nil }
         guard let owner = ownerTextView, owner.isEditable else { return super.hitTest(point) }
         // `point` is in the superview's coordinates.
         return frame.contains(point) ? self : nil
@@ -75,6 +80,20 @@ final class HTMLBlockHostView: NSView {
         } else {
             super.scrollWheel(with: event)
         }
+    }
+}
+
+/// The body font and theme a block's view was drawn with. Theme colors are
+/// compared as objects, so a dynamic system color compares equal to itself.
+struct HTMLBlockDrawingState: Equatable {
+    let fontName: String
+    let fontSize: CGFloat
+    let themeColors: [NSColor]
+
+    init(fontName: String, fontSize: CGFloat, theme: MarkdownEditorTheme) {
+        self.fontName = fontName
+        self.fontSize = fontSize
+        self.themeColors = Mirror(reflecting: theme).children.compactMap { $0.value as? NSColor }
     }
 }
 
@@ -115,13 +134,21 @@ extension NativeTextView {
         }
         htmlBlockReconcileGeneration &+= 1
         let generation = htmlBlockReconcileGeneration
-        guard !anchors.isEmpty else {
+        defer { pruneHTMLBlockHeights(keeping: anchors.map(\.anchor.html)) }
+        guard let last = anchors.last else {
             hideHTMLBlockViews(unseenSince: generation)
             return
         }
 
-        // Settle layout first: stale fragments would put views at old Ys.
-        tlm.ensureLayout(for: tlm.documentRange)
+        // Settle layout first, through the last block only: stale fragments
+        // would put views at old Ys, and text after it doesn't move them.
+        let documentRange = tlm.documentRange
+        if let lastEnd = tlm.textContentManager?.location(documentRange.location, offsetBy: NSMaxRange(last.range)),
+           let settled = NSTextRange(location: documentRange.location, end: lastEnd) {
+            tlm.ensureLayout(for: settled)
+        } else {
+            tlm.ensureLayout(for: documentRange)
+        }
         let width = max(container.size.width - container.lineFragmentPadding * 2, 1)
         var occurrences: [String: Int] = [:]
         for (range, anchor) in anchors {
@@ -144,6 +171,11 @@ extension NativeTextView {
                 fontSize: anchor.fontSize,
                 theme: configuration.theme
             )
+            let drawingState = HTMLBlockDrawingState(
+                fontName: anchor.fontName,
+                fontSize: anchor.fontSize,
+                theme: configuration.theme
+            )
 
             if let host = htmlBlockViews[key] {
                 host.lastSeenGeneration = generation
@@ -154,18 +186,17 @@ extension NativeTextView {
                     host.frame = frame
                     setNeedsDisplay(frame)
                 }
-                if host.fontName != anchor.fontName || host.fontSize != anchor.fontSize, let view = host.content {
-                    host.fontName = anchor.fontName
-                    host.fontSize = anchor.fontSize
+                if host.drawnWith != drawingState, let view = host.content {
+                    host.drawnWith = drawingState
                     renderer.update(view, for: content)
                 }
             } else {
                 let host = HTMLBlockHostView(
                     key: key,
+                    html: anchor.html,
                     anchorLocation: range.location,
                     ownerTextView: self,
-                    fontName: anchor.fontName,
-                    fontSize: anchor.fontSize,
+                    drawnWith: drawingState,
                     generation: generation
                 )
                 host.frame = frame
@@ -193,6 +224,16 @@ extension NativeTextView {
                 host.removeFromSuperview()
                 htmlBlockViews.removeValue(forKey: key)
             }
+        }
+    }
+
+    /// Forgets reported heights for HTML no longer in the document or held by
+    /// a retained view, so a block edited many times leaves no trail of them.
+    private func pruneHTMLBlockHeights(keeping rendered: [String]) {
+        guard let bridge = layoutBridge, !bridge.htmlBlockHeights.isEmpty else { return }
+        let live = Set(rendered).union(htmlBlockViews.values.map(\.html))
+        for html in bridge.htmlBlockHeights.keys where !live.contains(html) {
+            bridge.htmlBlockHeights.removeValue(forKey: html)
         }
     }
 

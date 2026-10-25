@@ -55,7 +55,12 @@ struct WebKitHTMLBlockEditorTests {
 
         let container = try #require(bridge.firstTextContainer)
         let afterRange = (text as NSString).range(of: "After the plan.")
-        let afterBefore = bridge.boundingRect(forCharacterRange: afterRange, in: container).minY
+        let tlm = try #require(textView.textLayoutManager)
+        let afterY = {
+            tlm.ensureLayout(for: tlm.documentRange)
+            return bridge.boundingRect(forCharacterRange: afterRange, in: container).minY
+        }
+        let afterBefore = afterY()
 
         let deadline = Date().addingTimeInterval(15)
         while Date() < deadline, textView.htmlBlockViews.values.first?.frame.height != 180 {
@@ -65,7 +70,7 @@ struct WebKitHTMLBlockEditorTests {
         let host = try #require(textView.htmlBlockViews.values.first)
         #expect(host.frame.height == 180)
         #expect(bridge.htmlBlockHeights[html] == 180)
-        let afterNow = bridge.boundingRect(forCharacterRange: afterRange, in: container).minY
+        let afterNow = afterY()
         #expect(afterNow - afterBefore > 100)
         // The text after the block starts below it.
         #expect(afterNow + textView.textContainerOrigin.y >= host.frame.maxY)

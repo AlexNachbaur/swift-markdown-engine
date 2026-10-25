@@ -594,8 +594,13 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             context.coordinator.lastHTMLBlockFingerprint = newHTMLBlockFingerprint
             context.coordinator.configuration.services = configuration.services
             textView.configuration.services = configuration.services
-            // Views made by the old renderer drew with its resources; make them again.
-            if htmlBlocksChanged { textView.removeAllHTMLBlockViews() }
+            if htmlBlocksChanged {
+                // Views made by the old renderer drew with its resources; make
+                // them again. Switching the renderer on or off also changes
+                // what parses as an HTML block, so the cached parse is stale.
+                textView.removeAllHTMLBlockViews()
+                context.coordinator.cachedParsedDocument = nil
+            }
             // An image change re-measures; so does an HTML-block one (switching
             // the renderer on or off reparses). A wiki-link rename is style-only.
             if imageChanged || htmlBlocksChanged, let tlm = textView.textLayoutManager {

@@ -160,11 +160,13 @@ struct HTMLBlockParserTests {
         "<div class=\"note\">", "</div>", "<p><img src=\"a.png\"><img src=\"b.png\"></p>",
         "<!-- a comment", "still commenting -->", "<!-- one line -->",
         "<pre>", "code inside", "</pre>", "<span>", "<details><summary>More</summary>",
+        "<!DOCTYPE html", "<?php echo 1", "<![CDATA[ raw",
         "# Heading", "- list item", "> quote", "```", "let x = 1", "$$", "",
     ]
 
     private static let editSnippets = [
         "x", "<", ">", "<!--", "-->", "</div>", "<div>", "</pre>", "\n", "\n\n", "``", "$$", " ",
+        "?>", "]]>", "<!DOCTYPE",
     ]
 
     private struct Rng {
@@ -215,5 +217,25 @@ struct HTMLBlockParserTests {
             #expect(incremental == full, "seed \(seed) step \(step): diverged after inserting \(insert.debugDescription) at \(loc), removing \(removeLen)\nBEFORE:\n\(before.debugDescription)\nAFTER:\n\(text.debugDescription)")
             if incremental != full { return }
         }
+    }
+
+    @Test("a > typed far below an unclosed declaration closes it, incrementally too")
+    func distantDeclarationClose() {
+        let state = DocumentParseState()
+        let filler = (0..<12).map { "para \($0)" }.joined(separator: "\n\n")
+        let text = "<!DOCTYPE html\n\n\(filler)\n\nalpha beta\n"
+        _ = state.tokens(for: text, edit: nil, registry: html)
+
+        let location = (text as NSString).range(of: "alpha ").upperBound
+        let edited = (text as NSString).replacingCharacters(in: NSRange(location: location, length: 0), with: ">")
+        let edit = ParseEditDescriptor(editedRange: NSRange(location: location, length: 1), delta: 1)
+        let incremental = dump(state.tokens(for: edited, edit: edit, registry: html))
+        let full = dump(MarkdownTokenizer.fullTokens(
+            blocks: BlockParser.computeBlocks(edited, registry: html),
+            ns: edited as NSString,
+            registry: html
+        ))
+        #expect(incremental == full)
+        #expect(full.contains { $0.hasPrefix("htmlBlock|") })
     }
 }

@@ -267,6 +267,7 @@ public struct HTMLBlockContent: Sendable {
     /// The editor theme, for text and link colors.
     public let theme: MarkdownEditorTheme
 
+    /// Creates the content for one block.
     public init(html: String, fontName: String, fontSize: CGFloat, theme: MarkdownEditorTheme) {
         self.html = html
         self.fontName = fontName
@@ -278,11 +279,15 @@ public struct HTMLBlockContent: Sendable {
 /// Default renderer that leaves HTML-block recognition off, so HTML stays
 /// literal text.
 public struct NoOpHTMLBlockRenderer: HTMLBlockRenderer {
+    /// Creates the default renderer.
     public init() {}
+    /// Always `false`: HTML is not recognized as blocks.
     public var isEnabled: Bool { false }
+    /// Never called, since no HTML blocks are recognized; returns an empty view.
     public func makeView(for block: HTMLBlockContent, heightDidChange: @escaping @MainActor (CGFloat) -> Void) -> NSView {
         NSView()
     }
+    /// Never called; does nothing.
     public func update(_ view: NSView, for block: HTMLBlockContent) {}
 }
 

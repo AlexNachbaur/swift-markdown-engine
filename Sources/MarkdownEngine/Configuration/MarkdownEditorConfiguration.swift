@@ -559,11 +559,13 @@ public struct HTMLBlockStyle: Sendable {
     /// Space below a rendered block.
     public var paragraphSpacing: CGFloat
 
+    /// Creates a style with the given spacing around each rendered block.
     public init(paragraphSpacingBefore: CGFloat = 8, paragraphSpacing: CGFloat = 12) {
         self.paragraphSpacingBefore = paragraphSpacingBefore
         self.paragraphSpacing = paragraphSpacing
     }
 
+    /// 8 points above a block, 12 below.
     public static let `default` = HTMLBlockStyle()
 }
 
