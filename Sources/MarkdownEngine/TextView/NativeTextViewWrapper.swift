@@ -599,7 +599,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
                 // Switching the renderer on or off also changes what parses as
                 // an HTML block, so the cached parse is stale.
                 textView.removeAllHTMLBlockViews()
-                textView.layoutBridge?.htmlBlockMeasuredWidths.removeAll()
+                textView.layoutBridge?.htmlBlockMeasuredLayouts.removeAll()
                 context.coordinator.cachedParsedDocument = nil
             }
             context.coordinator.configuration.services = configuration.services

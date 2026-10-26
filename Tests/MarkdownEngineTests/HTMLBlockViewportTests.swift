@@ -139,7 +139,7 @@ struct HTMLBlockViewportTests {
 
         drain()
         #expect(editor.bridge.htmlBlockHeights[Self.bottom] == 260)
-        #expect(editor.bridge.htmlBlockMeasuredWidths[Self.bottom] == editor.width)
+        #expect(editor.bridge.htmlBlockMeasuredLayouts[Self.bottom]?.width == editor.width)
         #expect(editor.textView.htmlBlockMeasurements.isEmpty)
         // The measuring view went back once its height settled.
         #expect(renderer.released.count == 1)
@@ -181,7 +181,8 @@ struct HTMLBlockViewportTests {
         let before = try #require(tlm.textLayoutFragment(for: probe)).rangeInElement.location
 
         // The top block, off screen above, reports a much taller height.
-        editor.textView.htmlBlock(Self.top, didReportHeight: 420, width: editor.width)
+        let layout = try #require(editor.bridge.htmlBlockMeasuredLayouts[Self.top])
+        editor.textView.htmlBlock(Self.top, didReportHeight: 420, layout: layout)
         drain()
         sizeToContent(editor)
 
@@ -199,11 +200,65 @@ struct HTMLBlockViewportTests {
         drain()
         #expect(editor.textView.htmlBlockMeasurements.isEmpty)
 
-        editor.bridge.htmlBlockMeasuredWidths[Self.bottom] = editor.width + 80
+        editor.bridge.htmlBlockMeasuredLayouts[Self.bottom]?.width = editor.width + 80
         editor.textView.updateHTMLBlockViews()
         #expect(editor.textView.htmlBlockMeasurements.keys.contains(Self.bottom))
         drain()
-        #expect(editor.bridge.htmlBlockMeasuredWidths[Self.bottom] == editor.width)
+        #expect(editor.bridge.htmlBlockMeasuredLayouts[Self.bottom]?.width == editor.width)
+    }
+
+    @Test("A height measured with another body font is measured again")
+    func otherFontIsRemeasured() throws {
+        let renderer = PoolingRenderer(heights: [Self.top: 120, Self.bottom: 260])
+        let editor = try makeEditor(renderer: renderer)
+        drain()
+        editor.bridge.htmlBlockMeasuredLayouts[Self.bottom]?.fontSize = 18
+        editor.textView.updateHTMLBlockViews()
+        #expect(editor.textView.htmlBlockMeasurements.keys.contains(Self.bottom))
+        drain()
+        #expect(editor.bridge.htmlBlockMeasuredLayouts[Self.bottom]?.fontSize == 14)
+    }
+
+    @Test("A block that draws nothing is measured once, not over and over")
+    func emptyBlockMeasuredOnce() throws {
+        NativeTextView.htmlBlockMeasurementDeadline = 0.1
+        defer { NativeTextView.htmlBlockMeasurementDeadline = 4 }
+        // Reports 0, as a lone <style> or a hidden element does.
+        let renderer = PoolingRenderer(heights: [Self.top: 120, Self.bottom: 0])
+        let editor = try makeEditor(renderer: renderer)
+        drain(0.6)
+        #expect(renderer.madeFor.filter { $0 == Self.bottom }.count == 1)
+        #expect(editor.bridge.htmlBlockHeights[Self.bottom] == 0)
+        #expect(editor.textView.htmlBlockMeasurements.isEmpty)
+    }
+
+    @Test("Before its scroll view has a size, no block gets a live view")
+    func emptyViewportMakesNoLiveViews() throws {
+        let renderer = PoolingRenderer(heights: [Self.top: 120, Self.bottom: 260])
+        let editor = try makeEditor(renderer: renderer)
+        editor.textView.removeAllHTMLBlockViews()
+        editor.scrollView.setFrameSize(.zero)
+        editor.textView.updateHTMLBlockViews()
+        #expect(editor.textView.htmlBlockViews.isEmpty)
+
+        // The scroll view gets its size: the block on screen gets its view.
+        editor.scrollView.setFrameSize(NSSize(width: 600, height: 400))
+        drain()
+        #expect(liveHTML(editor) == [Self.top])
+    }
+
+    @Test("A view whose block's source is being edited survives scrolling nearby")
+    func hiddenViewSurvivesScrolling() throws {
+        let renderer = PoolingRenderer(heights: [Self.top: 120, Self.bottom: 260])
+        let editor = try makeEditor(renderer: renderer)
+        drain()
+        let host = try #require(editor.textView.htmlBlockViews.values.first { $0.html == Self.top })
+        editor.textView.isEditable = true
+        editor.textView.setSelectedRange(NSRange(location: 3, length: 0))
+        #expect(host.isHidden)
+        for _ in 0..<40 { editor.textView.updateHTMLBlockViews() }
+        #expect(host.superview != nil)
+        #expect(!renderer.released.contains { $0 === host.content })
     }
 
     @Test("Removing every view gives each back to the renderer")

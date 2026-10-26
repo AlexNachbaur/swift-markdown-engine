@@ -30,10 +30,13 @@ struct HeightScriptTests {
                   innerHeight: \(viewport),
                   addEventListener: function () {},
                   webkit: { messageHandlers: { \(HeightMessageHandler.name): {
-                    postMessage: function (h) { posted.push(h); }
+                    postMessage: function (m) { if (m.use === 'use-test') posted.push(m.height); }
                   } } }
                 };
-                var document = { body: { getBoundingClientRect: function () { return { height: bodyHeight }; } } };
+                var document = {
+                  body: { getBoundingClientRect: function () { return { height: bodyHeight }; } },
+                  querySelector: function () { return { content: 'use-test' }; }
+                };
                 function ResizeObserver(callback) { observers.push(callback); this.observe = function () {}; }
                 """)
             context.evaluateScript(HTMLBlockDocument.heightScript)

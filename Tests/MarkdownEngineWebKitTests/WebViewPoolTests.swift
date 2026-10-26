@@ -155,6 +155,32 @@ struct WebViewPoolTests {
         #expect(pool.idle.isEmpty)
     }
 
+    @Test("A message or request from a previous use's page reaches nothing")
+    func previousUseIsIgnored() async throws {
+        let pool = HTMLBlockWebViewPool.shared
+        pool.purge()
+        let renderer = WebKitHTMLBlockRenderer()
+        let first = try await show("<div style=\"height: 90px\"></div>", with: renderer) { $0 >= 90 }
+        let webView = try #require(first.view as? HTMLBlockWebView)
+        let oldUse = try #require(webView.lease?.resourceHost)
+        renderer.releaseView(first.view)
+
+        let second = try await show("<div style=\"height: 40px\"></div>", with: renderer) { $0 >= 40 }
+        #expect(second.view === first.view)
+        let reports = second.reports.heights.count
+        // A late report stamped with the old use, as the old page would send it.
+        _ = try await webView.evaluateJavaScript(
+            "window.webkit.messageHandlers.\(HeightMessageHandler.name).postMessage({ use: '\(oldUse)', height: 999 }); 0",
+            in: nil,
+            contentWorld: .defaultClient
+        )
+        try await Task.sleep(nanoseconds: 300_000_000)
+        #expect(second.reports.heights.count == reports)
+        #expect(!second.reports.heights.contains(999))
+        renderer.releaseView(second.view)
+        pool.purge()
+    }
+
     @Test("A released view no longer reports, even if its page still does")
     func releasedViewIsSilent() async throws {
         let pool = HTMLBlockWebViewPool.shared

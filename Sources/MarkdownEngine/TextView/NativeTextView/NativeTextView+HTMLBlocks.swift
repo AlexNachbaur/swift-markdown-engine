@@ -98,17 +98,18 @@ final class HTMLBlockHostView: NSView {
     }
 }
 
-/// An off-screen view measuring one block's height at a column width. It is
-/// done once its reports have settled, or at a deadline if they never do.
+/// An off-screen view measuring one block's height for a layout. It is done
+/// once its reports have settled and the renderer says it has finished
+/// loading, or at a deadline if that never happens.
 final class HTMLBlockMeasurement {
     let host: HTMLBlockHostView
-    let width: CGFloat
+    let layout: HTMLBlockLayout
     var settleTimer: Timer?
     var deadlineTimer: Timer?
 
-    init(host: HTMLBlockHostView, width: CGFloat) {
+    init(host: HTMLBlockHostView, layout: HTMLBlockLayout) {
         self.host = host
-        self.width = width
+        self.layout = layout
     }
 
     func invalidateTimers() {
@@ -161,10 +162,12 @@ extension NativeTextView {
 
     /// The part of the document whose blocks get a live view: the visible
     /// rect and a screen's height above and below it. Everything when the
-    /// view isn't on screen to tell.
+    /// text view has no scroll view to say what is visible; nothing while
+    /// its scroll view has no size yet (the first passes after a document
+    /// opens), until scrolling or resizing reconciles again.
     private var htmlBlockLiveRect: NSRect {
         let visible = visibleRect
-        guard !visible.isEmpty else { return .infinite }
+        guard !visible.isEmpty else { return enclosingScrollView == nil ? .infinite : .null }
         let margin = max(visible.height, 200)
         return visible.insetBy(dx: -visible.width, dy: -margin)
     }
@@ -190,6 +193,7 @@ extension NativeTextView {
         htmlBlockReconcileGeneration &+= 1
         let generation = htmlBlockReconcileGeneration
         let liveRect = htmlBlockLiveRect
+        htmlBlockDocumentHasBlocks = !anchors.isEmpty
         defer { pruneHTMLBlockHeights(keeping: anchors.map(\.anchor.html)) }
         guard let last = anchors.last else {
             hideHTMLBlockViews(unseenSince: generation, liveRect: liveRect, renderer: renderer)
@@ -208,9 +212,10 @@ extension NativeTextView {
             tlm.ensureLayout(for: documentRange)
         }
         let width = max(container.size.width - container.lineFragmentPadding * 2, 1)
+        let center = liveRect.isNull ? 0 : liveRect.midY
         var occurrences: [String: Int] = [:]
         var liveHTML: Set<String> = []
-        var needsMeasuring: [(html: String, content: HTMLBlockContent, drawingState: HTMLBlockDrawingState, distance: CGFloat)] = []
+        var needsMeasuring: [(html: String, content: HTMLBlockContent, drawingState: HTMLBlockDrawingState, layout: HTMLBlockLayout, distance: CGFloat)] = []
         for (range, anchor) in anchors {
             let occurrence = occurrences[anchor.html, default: 0]
             occurrences[anchor.html] = occurrence + 1
@@ -236,13 +241,14 @@ extension NativeTextView {
                 fontSize: anchor.fontSize,
                 theme: configuration.theme
             )
+            let layout = HTMLBlockLayout(width: width, fontName: anchor.fontName, fontSize: anchor.fontSize)
 
             guard frame.intersects(liveRect) else {
                 // Far from the screen: no view, only the reserved space.
                 if let host = htmlBlockViews[key] { releaseHTMLBlockHost(host, renderer: renderer) }
-                if !hasHTMLBlockHeight(anchor.html, atWidth: width) {
-                    let distance = min(abs(frame.minY - liveRect.midY), abs(frame.maxY - liveRect.midY))
-                    needsMeasuring.append((anchor.html, content, drawingState, distance))
+                if !hasHTMLBlockHeight(anchor.html, for: layout) {
+                    let distance = min(abs(frame.minY - center), abs(frame.maxY - center))
+                    needsMeasuring.append((anchor.html, content, drawingState, layout, distance))
                 }
                 continue
             }
@@ -274,7 +280,11 @@ extension NativeTextView {
                 let html = anchor.html
                 let view = renderer.makeView(for: content) { [weak self, weak host] reported in
                     guard let self, let host, host.isActive else { return }
-                    self.htmlBlock(html, didReportHeight: reported, width: host.frame.width)
+                    self.htmlBlock(html, didReportHeight: reported, layout: HTMLBlockLayout(
+                        width: host.frame.width,
+                        fontName: host.drawnWith.fontName,
+                        fontSize: host.drawnWith.fontSize
+                    ))
                 }
                 host.setContent(view)
                 addSubview(host)
@@ -295,29 +305,36 @@ extension NativeTextView {
                 candidate.html,
                 content: candidate.content,
                 drawingState: candidate.drawingState,
-                width: width,
+                layout: candidate.layout,
                 generation: generation,
                 renderer: renderer
             )
         }
     }
 
-    private func hasHTMLBlockHeight(_ html: String, atWidth width: CGFloat) -> Bool {
-        guard let bridge = layoutBridge, bridge.htmlBlockHeights[html] != nil,
-              let measured = bridge.htmlBlockMeasuredWidths[html] else { return false }
-        return abs(measured - width) < 0.5
+    /// Whether the block was measured with `layout` (its height may be 0:
+    /// content that draws nothing, such as a lone `<style>`).
+    private func hasHTMLBlockHeight(_ html: String, for layout: HTMLBlockLayout) -> Bool {
+        guard let measured = layoutBridge?.htmlBlockMeasuredLayouts[html] else { return false }
+        return measured.matches(layout)
     }
 
     /// Hides views whose block is not rendered right now (the caret is in it,
-    /// or it was edited away), and releases the ones unseen for a while or far
-    /// from the screen.
+    /// or it was edited away), and releases the ones far from the screen, and
+    /// the ones whose HTML has left the document after a while. A view whose
+    /// block's source is being edited stays, however much the reader scrolls
+    /// near it, so leaving the block doesn't reload it.
     private func hideHTMLBlockViews(unseenSince generation: Int, liveRect: NSRect, renderer: any HTMLBlockRenderer) {
+        let text = string as NSString
         for (_, host) in htmlBlockViews where host.lastSeenGeneration != generation {
             if !host.isHidden {
                 host.isHidden = true
                 setNeedsDisplay(host.frame)
             }
-            if generation &- host.lastSeenGeneration > Self.htmlBlockViewRetention || !host.frame.intersects(liveRect) {
+            let farAway = !host.frame.intersects(liveRect)
+            let editedAway = generation &- host.lastSeenGeneration > Self.htmlBlockViewRetention
+                && text.range(of: host.html).location == NSNotFound
+            if farAway || editedAway {
                 releaseHTMLBlockHost(host, renderer: renderer)
             }
         }
@@ -341,7 +358,7 @@ extension NativeTextView {
             .union(htmlBlockMeasurements.keys)
         for html in bridge.htmlBlockHeights.keys where !live.contains(html) {
             bridge.htmlBlockHeights.removeValue(forKey: html)
-            bridge.htmlBlockMeasuredWidths.removeValue(forKey: html)
+            bridge.htmlBlockMeasuredLayouts.removeValue(forKey: html)
         }
     }
 
@@ -374,7 +391,7 @@ extension NativeTextView {
     }
 
     @objc private func htmlBlockClipViewBoundsDidChange(_ notification: Notification) {
-        guard !htmlBlockViews.isEmpty || !htmlBlockMeasurements.isEmpty || layoutBridge?.htmlBlockHeights.isEmpty == false else { return }
+        guard htmlBlockDocumentHasBlocks else { return }
         scheduleHTMLBlockReconcile()
     }
 
@@ -397,10 +414,11 @@ extension NativeTextView {
         _ html: String,
         content: HTMLBlockContent,
         drawingState: HTMLBlockDrawingState,
-        width: CGFloat,
+        layout: HTMLBlockLayout,
         generation: Int,
         renderer: any HTMLBlockRenderer
     ) {
+        let width = layout.width
         let host = HTMLBlockHostView(
             key: "measuring#\(html)",
             html: html,
@@ -412,7 +430,7 @@ extension NativeTextView {
         host.isMeasuring = true
         let startHeight = layoutBridge?.htmlBlockHeights[html] ?? baseFont.pointSize * 1.4
         host.frame = NSRect(x: Self.htmlBlockMeasuringOriginX - width, y: 0, width: width, height: max(startHeight, 1))
-        let measurement = HTMLBlockMeasurement(host: host, width: width)
+        let measurement = HTMLBlockMeasurement(host: host, layout: layout)
         htmlBlockMeasurements[html] = measurement
         addSubview(host)
         measurement.deadlineTimer = Timer.scheduledTimer(withTimeInterval: Self.htmlBlockMeasurementDeadline, repeats: false) { [weak self] _ in
@@ -428,18 +446,39 @@ extension NativeTextView {
     /// A measuring view reported: record the height, size the view to it as
     /// a live one would be, and wait for the reports to settle.
     private func htmlBlockMeasurement(_ html: String, didReport reported: CGFloat) {
-        guard let measurement = htmlBlockMeasurements[html], reported.isFinite, reported > 0 else { return }
-        measurement.host.frame.size.height = ceil(reported)
-        htmlBlock(html, didReportHeight: reported, width: measurement.width)
+        guard let measurement = htmlBlockMeasurements[html], reported.isFinite, reported >= 0 else { return }
+        measurement.host.frame.size.height = max(ceil(reported), 1)
+        htmlBlock(html, didReportHeight: reported, layout: measurement.layout)
+        scheduleHTMLBlockMeasurementSettle(html)
+    }
+
+    private func scheduleHTMLBlockMeasurementSettle(_ html: String) {
+        guard let measurement = htmlBlockMeasurements[html] else { return }
         measurement.settleTimer?.invalidate()
         measurement.settleTimer = Timer.scheduledTimer(withTimeInterval: Self.htmlBlockMeasurementSettleDelay, repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated { self?.finishHTMLBlockMeasurement(html) }
+            MainActor.assumeIsolated { self?.htmlBlockMeasurementSettled(html) }
         }
+    }
+
+    /// Quiet for a while: done, unless the renderer is still loading what
+    /// the block shows (a slow image), in which case wait on.
+    private func htmlBlockMeasurementSettled(_ html: String) {
+        guard let measurement = htmlBlockMeasurements[html] else { return }
+        if let view = measurement.host.content, !configuration.services.htmlBlocks.hasSettled(view) {
+            scheduleHTMLBlockMeasurementSettle(html)
+            return
+        }
+        finishHTMLBlockMeasurement(html)
     }
 
     private func finishHTMLBlockMeasurement(_ html: String) {
         guard let measurement = htmlBlockMeasurements.removeValue(forKey: html) else { return }
         measurement.invalidateTimers()
+        // Measured for this layout even if it never reported (it may draw
+        // nothing, or fail to load), so it isn't measured over and over.
+        if let bridge = layoutBridge, bridge.htmlBlockMeasuredLayouts[html].map({ $0.matches(measurement.layout) }) != true {
+            bridge.htmlBlockMeasuredLayouts[html] = measurement.layout
+        }
         releaseMeasuringHost(measurement.host)
         // Start the next one.
         scheduleHTMLBlockReconcile()
@@ -463,12 +502,13 @@ extension NativeTextView {
 
     // MARK: Reported heights
 
-    /// Records a block's new content height at `width` and restyles that
-    /// block once per run-loop turn, however many views report in it.
-    func htmlBlock(_ html: String, didReportHeight reported: CGFloat, width: CGFloat) {
-        guard let bridge = layoutBridge, reported.isFinite, reported > 0 else { return }
+    /// Records a block's new content height for `layout` and restyles that
+    /// block once per run-loop turn, however many views report in it. A
+    /// height of 0 is real: content that draws nothing.
+    func htmlBlock(_ html: String, didReportHeight reported: CGFloat, layout: HTMLBlockLayout) {
+        guard let bridge = layoutBridge, reported.isFinite, reported >= 0 else { return }
         let height = ceil(reported)
-        bridge.htmlBlockMeasuredWidths[html] = width
+        bridge.htmlBlockMeasuredLayouts[html] = layout
         if let current = bridge.htmlBlockHeights[html], abs(current - height) < 0.5 { return }
         bridge.htmlBlockHeights[html] = height
         let alreadyScheduled = !htmlBlocksAwaitingRestyle.isEmpty

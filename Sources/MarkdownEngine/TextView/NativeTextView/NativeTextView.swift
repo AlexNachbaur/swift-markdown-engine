@@ -103,6 +103,9 @@ final class NativeTextView: NSTextView {
     weak var htmlBlockObservedClipView: NSClipView?
     /// Coalesces scroll-driven reconciles to one per run-loop turn.
     var htmlBlockReconcileScheduled = false
+    /// Whether the last reconcile found any rendered blocks; scrolling a
+    /// document without them reconciles nothing.
+    var htmlBlockDocumentHasBlocks = false
 
     /// While Writing Tools slide the text below an edit into place: the rest of the
     /// edited paragraph; fragments from its end on are not drawn (`NativeTextView+WritingTools`).

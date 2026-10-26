@@ -168,6 +168,13 @@ public final class WebKitHTMLBlockRenderer: HTMLBlockRenderer, @unchecked Sendab
         guard let webView = view as? HTMLBlockWebView else { return }
         HTMLBlockWebViewPool.shared.enqueue(webView)
     }
+
+    /// Settled once the page and everything it loads have finished loading.
+    @MainActor
+    public func hasSettled(_ view: NSView) -> Bool {
+        guard let webView = view as? HTMLBlockWebView else { return true }
+        return !webView.isLoading && !webView.isWaitingForRuleList
+    }
 }
 
 /// What one use of a pooled web view draws with: one renderer's resources,
@@ -182,9 +189,12 @@ final class HTMLBlockLease {
     let heightDidChange: @MainActor (CGFloat) -> Void
     let onBlockedRemoteContent: (@MainActor @Sendable (URL) -> Void)?
     let openURL: @MainActor @Sendable (URL) -> Void
-    /// The host this use's resources load under. WebKit caches loads by URL,
-    /// so a fresh host per use keeps a reused view from showing what another
-    /// document, or an older copy of a file, loaded at the same path.
+    /// Names this use. Its resources load under it as the URL host: WebKit
+    /// caches loads by URL, so a fresh host per use keeps a reused view from
+    /// showing what another document, or an older copy of a file, loaded at
+    /// the same path. Its page carries it too, and every message and request
+    /// must, so a previous use's page, still alive until the next one
+    /// replaces it, can't reach this one.
     let resourceHost = "use-" + UUID().uuidString.lowercased()
 
     init(
@@ -214,7 +224,12 @@ final class HTMLBlockLease {
     }
 
     var pageOptions: HTMLBlockPageOptions {
-        HTMLBlockPageOptions(stylesheet: stylesheet, baseURL: baseURL, allowsRemoteContent: allowsRemoteContent)
+        HTMLBlockPageOptions(
+            stylesheet: stylesheet,
+            baseURL: baseURL,
+            allowsRemoteContent: allowsRemoteContent,
+            useToken: resourceHost
+        )
     }
 }
 
@@ -313,6 +328,8 @@ struct HTMLBlockPageOptions {
     var stylesheet = ""
     var baseURL: URL?
     var allowsRemoteContent = true
+    /// The use the page belongs to; its scripts send it with every message.
+    var useToken = ""
 }
 
 // MARK: - Web view
@@ -378,25 +395,33 @@ final class HTMLBlockWebView: WKWebView {
         self.lease = lease
         contentController.removeAllContentRuleLists()
         guard !lease.allowsRemoteContent else {
+            isWaitingForRuleList = false
             show(block)
             return
         }
         // The policy in the page doesn't govern everything (`preconnect`
         // opens a connection regardless), so a content rule list blocks every
-        // web request as well. It compiles once, asynchronously; the page
-        // waits for it, unless the view has moved on to another use.
+        // web request as well. It compiles once, asynchronously; no page
+        // loads before it is in, unless the view has moved on to another use.
         self.block = block
+        isWaitingForRuleList = true
         RemoteContentRuleList.whenReady { [weak self] ruleList in
             guard let self, self.lease === lease else { return }
             if let ruleList { self.contentController.add(ruleList) }
-            self.show(block)
+            self.isWaitingForRuleList = false
+            if let block = self.block { self.show(block) }
         }
     }
+
+    /// Set while a use that blocks remote content waits for its rule list;
+    /// pages asked for meanwhile load once it is in.
+    private(set) var isWaitingForRuleList = false
 
     /// Ends a use: the block's page goes, and with it its loads and scripts.
     func end() {
         lease = nil
         block = nil
+        isWaitingForRuleList = false
         removeFromSuperview()
         stopLoading()
         contentController.removeAllContentRuleLists()
@@ -407,12 +432,14 @@ final class HTMLBlockWebView: WKWebView {
     func show(_ block: HTMLBlockContent) {
         guard let lease else { return }
         self.block = block
+        guard !isWaitingForRuleList else { return }
         let page = lease.pageOptions
         let html = HTMLBlockDocument.page(
             for: block,
             colors: HTMLBlockDocument.colorRules(for: block.theme, appearance: effectiveAppearance),
             stylesheet: page.stylesheet,
-            allowsRemoteContent: page.allowsRemoteContent
+            allowsRemoteContent: page.allowsRemoteContent,
+            useToken: page.useToken
         )
         loadHTMLString(html, baseURL: ResourceSchemeHandler.pageBaseURL(for: page.baseURL, host: lease.resourceHost))
     }
@@ -477,7 +504,7 @@ enum HTMLBlockDocument {
         lastHeight = height;
         if (!changed || followsViewport) return;
         lastReported = height;
-        window.webkit.messageHandlers.\(HeightMessageHandler.name).postMessage(height);
+        window.webkit.messageHandlers.\(HeightMessageHandler.name).postMessage({ use: \(useTokenExpression), height: height });
       };
       new ResizeObserver(post).observe(document.body);
       window.addEventListener('resize', post);
@@ -500,6 +527,16 @@ enum HTMLBlockDocument {
         "connect-src \(ResourceSchemeHandler.scheme):",
     ].joined(separator: "; ")
 
+    /// Names the use a block's page belongs to (a `<meta>` in its head).
+    static let useTokenMetaName = "markdown-engine-use"
+
+    /// JavaScript that reads the page's use token, from the top page when run
+    /// in a frame (local frames share its origin).
+    static let useTokenExpression = """
+    (() => { let doc = document; try { doc = window.top.document; } catch (e) {} \
+    const meta = doc.querySelector('meta[name="\(useTokenMetaName)"]'); return meta ? meta.content : ''; })()
+    """
+
     /// Reports each remote URL the page's policy blocked, once. Runs at
     /// document start: images in the block are blocked while it parses.
     static let blockedContentScript = """
@@ -509,7 +546,7 @@ enum HTMLBlockDocument {
         const uri = event.blockedURI;
         if (!/^https?:/i.test(uri) || reported.has(uri)) return;
         reported.add(uri);
-        window.webkit.messageHandlers.\(BlockedContentMessageHandler.name).postMessage(uri);
+        window.webkit.messageHandlers.\(BlockedContentMessageHandler.name).postMessage({ use: \(useTokenExpression), url: uri });
       });
     })();
     """
@@ -518,7 +555,8 @@ enum HTMLBlockDocument {
         for block: HTMLBlockContent,
         colors: String,
         stylesheet: String,
-        allowsRemoteContent: Bool = true
+        allowsRemoteContent: Bool = true,
+        useToken: String = ""
     ) -> String {
         // DNS prefetching isn't governed by the policy; switch it off too.
         let policy = allowsRemoteContent
@@ -532,6 +570,7 @@ enum HTMLBlockDocument {
         <!doctype html>
         <html><head>
         \(policy)<meta charset="utf-8">
+        <meta name="\(useTokenMetaName)" content="\(useToken)">
         <style id="\(colorStyleID)">\(colors)</style>
         <style>
         :root { color-scheme: light dark; }
@@ -611,9 +650,15 @@ final class HeightMessageHandler: NSObject, WKScriptMessageHandler {
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard let number = message.body as? NSNumber else { return }
+        guard let body = message.body as? [String: Any],
+              let use = body["use"] as? String,
+              let number = body["height"] as? NSNumber else { return }
         let height = CGFloat(number.doubleValue)
-        MainActor.assumeIsolated { webView?.lease?.heightDidChange(height) }
+        MainActor.assumeIsolated {
+            // A previous use's page may still report until the next one replaces it.
+            guard let lease = webView?.lease, lease.resourceHost == use else { return }
+            lease.heightDidChange(height)
+        }
     }
 }
 
@@ -627,8 +672,14 @@ final class BlockedContentMessageHandler: NSObject, WKScriptMessageHandler {
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard let string = message.body as? String, let url = URL(string: string) else { return }
-        MainActor.assumeIsolated { webView?.lease?.onBlockedRemoteContent?(url) }
+        guard let body = message.body as? [String: Any],
+              let use = body["use"] as? String,
+              let string = body["url"] as? String,
+              let url = URL(string: string) else { return }
+        MainActor.assumeIsolated {
+            guard let lease = webView?.lease, lease.resourceHost == use else { return }
+            lease.onBlockedRemoteContent?(url)
+        }
     }
 }
 
@@ -733,8 +784,11 @@ final class ResourceSchemeHandler: NSObject, WKURLSchemeHandler, @unchecked Send
 
     @MainActor
     func webView(_ webView: WKWebView, start task: any WKURLSchemeTask) {
+        // Only the current use's own requests: a previous use's page, still
+        // alive until the next one replaces it, asks under its own host.
         guard let requestURL = task.request.url, let file = Self.fileURL(for: requestURL),
-              let lease = (webView as? HTMLBlockWebView)?.lease else {
+              let lease = (webView as? HTMLBlockWebView)?.lease,
+              requestURL.host == lease.resourceHost else {
             task.didFailWithError(URLError(.unsupportedURL))
             return
         }

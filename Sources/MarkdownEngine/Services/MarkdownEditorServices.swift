@@ -260,6 +260,13 @@ public protocol HTMLBlockRenderer: Sendable {
     @MainActor
     func releaseView(_ view: NSView)
 
+    /// Whether `view` has finished loading what it shows, so its height will
+    /// only change if its width does. A block measured off screen is done
+    /// once its reports have settled and this is `true` (or at a deadline).
+    /// The default is `true`.
+    @MainActor
+    func hasSettled(_ view: NSView) -> Bool
+
     /// Coarse fingerprint of what the renderer draws with, such as the
     /// resources it can read or its stylesheet. When a new configuration
     /// carries a different value, every view is made again, so content that
@@ -270,6 +277,7 @@ public protocol HTMLBlockRenderer: Sendable {
 public extension HTMLBlockRenderer {
     func fingerprint() -> AnyHashable { 0 }
     @MainActor func releaseView(_ view: NSView) {}
+    @MainActor func hasSettled(_ view: NSView) -> Bool { true }
 }
 
 /// What an ``HTMLBlockRenderer`` draws: the block's HTML and the document's

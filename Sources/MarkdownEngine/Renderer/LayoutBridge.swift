@@ -15,6 +15,18 @@ func layoutBridgeDefaultLineHeight(for font: NSFont, using bridge: LayoutBridge?
         ?? (font.ascender - font.descender + font.leading)
 }
 
+/// What an HTML block's height depends on besides its HTML: the column
+/// width and the body font it was laid out with.
+struct HTMLBlockLayout: Equatable {
+    var width: CGFloat
+    var fontName: String
+    var fontSize: CGFloat
+
+    func matches(_ other: HTMLBlockLayout) -> Bool {
+        abs(width - other.width) < 0.5 && fontName == other.fontName && fontSize == other.fontSize
+    }
+}
+
 final class LayoutBridge {
     private let textLayoutManager: NSTextLayoutManager
 
@@ -23,9 +35,10 @@ final class LayoutBridge {
     /// writes them as views report and restyles the block. Lives here because
     /// the bridge is the one per-view object every styling pass already holds.
     var htmlBlockHeights: [String: CGFloat] = [:]
-    /// The column width each of `htmlBlockHeights` was measured at. A height
-    /// from another width is still the best estimate, but it is measured again.
-    var htmlBlockMeasuredWidths: [String: CGFloat] = [:]
+    /// The column width and body font each of `htmlBlockHeights` was
+    /// measured with. A height from another layout is still the best
+    /// estimate, but it is measured again.
+    var htmlBlockMeasuredLayouts: [String: HTMLBlockLayout] = [:]
 
     init(_ textLayoutManager: NSTextLayoutManager) {
         self.textLayoutManager = textLayoutManager
