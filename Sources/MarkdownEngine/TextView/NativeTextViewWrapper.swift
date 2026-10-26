@@ -592,6 +592,11 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             context.coordinator.lastImageFingerprint = newImageFingerprint
             context.coordinator.lastWikiFingerprint = newWikiFingerprint
             context.coordinator.lastHTMLBlockFingerprint = newHTMLBlockFingerprint
+            // Switching the renderer on or off changes what parses as an HTML
+            // block, and so the layout; a new fingerprint alone only remakes
+            // the views, whose heights then restyle just their blocks.
+            let htmlBlocksToggled = htmlBlocksChanged
+                && configuration.services.htmlBlocks.isEnabled != textView.configuration.services.htmlBlocks.isEnabled
             if htmlBlocksChanged {
                 // Views made by the old renderer drew with its resources; hand
                 // them back to it (before it is replaced) and make them again.
@@ -604,15 +609,26 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             }
             context.coordinator.configuration.services = configuration.services
             textView.configuration.services = configuration.services
-            // An image change re-measures; so does an HTML-block one (switching
-            // the renderer on or off reparses). A wiki-link rename is style-only.
-            if imageChanged || htmlBlocksChanged, let tlm = textView.textLayoutManager {
+            // An image change re-measures; so does switching HTML blocks on or
+            // off (it reparses). A wiki-link rename is style-only.
+            if imageChanged || htmlBlocksToggled, let tlm = textView.textLayoutManager {
                 tlm.invalidateLayout(for: tlm.documentRange)
             }
-            // Restyle live tv content — full rebuild would clobber paste-fresh embeds when `text` binding hasn't caught up.
-            let fullRange = NSRange(location: 0, length: (textView.string as NSString).length)
-            if fullRange.length > 0 {
-                context.coordinator.restyleParagraphs([fullRange], in: textView)
+            // A new HTML-block fingerprint alone changes no attributes: the
+            // views are remade below, and nothing needs restyling.
+            if imageChanged || wikiChanged || htmlBlocksToggled {
+                // Restyle live tv content — full rebuild would clobber paste-fresh embeds when `text` binding hasn't caught up.
+                let fullRange = NSRange(location: 0, length: (textView.string as NSString).length)
+                if fullRange.length > 0 {
+                    context.coordinator.restyleParagraphs([fullRange], in: textView)
+                }
+                // Restyling everything invalidates all of TextKit's layout,
+                // so the height must come from a full layout again, as after a
+                // document switch. Measured from TextKit 2's estimates it
+                // drifts as the reader scrolls and fragments get laid out:
+                // the scroller jumps and text near the end can go missing.
+                textView.recalcOverscroll(for: nsView)
+                (nsView as? ClampedScrollView)?.clampToInsets()
             }
             if htmlBlocksChanged { textView.updateHTMLBlockViews() }
         }
