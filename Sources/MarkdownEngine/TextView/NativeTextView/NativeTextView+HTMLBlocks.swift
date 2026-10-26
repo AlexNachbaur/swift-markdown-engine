@@ -41,6 +41,16 @@ final class HTMLBlockHostView: NSView {
     var isMeasuring = false
     /// Cleared when the view goes back to the renderer; reports after that are ignored.
     var isActive = true
+    /// Set for a live view of a block that already has a height for this
+    /// layout: while its page loads it reports passing heights (before its
+    /// images arrive), and applying them would move the text and the scroller
+    /// only to move them back. Its reports wait until it has settled.
+    var holdsReportsUntilSettled = false
+    /// The latest report held back, applied once the view has settled.
+    var heldHeight: CGFloat?
+    var settleTimer: Timer?
+    /// When holding stops regardless, for a view that never says it settled.
+    var holdDeadline = Date.distantFuture
 
     init(key: String, html: String, anchorLocation: Int, ownerTextView: NativeTextView, drawnWith: HTMLBlockDrawingState, generation: Int) {
         self.key = key
@@ -106,6 +116,9 @@ final class HTMLBlockMeasurement {
     let layout: HTMLBlockLayout
     var settleTimer: Timer?
     var deadlineTimer: Timer?
+    /// The latest height reported; recorded only when the measurement is
+    /// done, so the passing heights of a loading page never move the text.
+    var lastReported: CGFloat?
 
     init(host: HTMLBlockHostView, layout: HTMLBlockLayout) {
         self.host = host
@@ -277,14 +290,14 @@ extension NativeTextView {
                     generation: generation
                 )
                 host.frame = frame
+                if hasHTMLBlockHeight(anchor.html, for: layout) {
+                    host.holdsReportsUntilSettled = true
+                    host.holdDeadline = Date().addingTimeInterval(Self.htmlBlockMeasurementDeadline)
+                }
                 let html = anchor.html
                 let view = renderer.makeView(for: content) { [weak self, weak host] reported in
                     guard let self, let host, host.isActive else { return }
-                    self.htmlBlock(html, didReportHeight: reported, layout: HTMLBlockLayout(
-                        width: host.frame.width,
-                        fontName: host.drawnWith.fontName,
-                        fontSize: host.drawnWith.fontSize
-                    ))
+                    self.liveHTMLBlock(host, didReport: reported)
                 }
                 host.setContent(view)
                 addSubview(host)
@@ -340,9 +353,45 @@ extension NativeTextView {
         }
     }
 
+    /// A live view reported: apply it, or hold it until the view has settled.
+    private func liveHTMLBlock(_ host: HTMLBlockHostView, didReport reported: CGFloat) {
+        guard host.holdsReportsUntilSettled else {
+            htmlBlock(host.html, didReportHeight: reported, layout: liveLayout(of: host))
+            return
+        }
+        host.heldHeight = reported
+        scheduleLiveSettleCheck(host)
+    }
+
+    private func liveLayout(of host: HTMLBlockHostView) -> HTMLBlockLayout {
+        HTMLBlockLayout(width: host.frame.width, fontName: host.drawnWith.fontName, fontSize: host.drawnWith.fontSize)
+    }
+
+    private func scheduleLiveSettleCheck(_ host: HTMLBlockHostView) {
+        guard host.settleTimer == nil else { return }
+        host.settleTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self, weak host] timer in
+            MainActor.assumeIsolated {
+                guard let self, let host, host.isActive, let view = host.content else {
+                    timer.invalidate()
+                    return
+                }
+                guard self.configuration.services.htmlBlocks.hasSettled(view) || Date() >= host.holdDeadline else { return }
+                timer.invalidate()
+                host.settleTimer = nil
+                host.holdsReportsUntilSettled = false
+                if let held = host.heldHeight {
+                    host.heldHeight = nil
+                    self.htmlBlock(host.html, didReportHeight: held, layout: self.liveLayout(of: host))
+                }
+            }
+        }
+    }
+
     /// Takes a host out and gives its view back to the renderer.
     private func releaseHTMLBlockHost(_ host: HTMLBlockHostView, renderer: any HTMLBlockRenderer) {
         host.isActive = false
+        host.settleTimer?.invalidate()
+        host.settleTimer = nil
         if htmlBlockViews[host.key] === host { htmlBlockViews.removeValue(forKey: host.key) }
         if !host.isHidden { setNeedsDisplay(host.frame) }
         host.removeFromSuperview()
@@ -443,12 +492,12 @@ extension NativeTextView {
         host.setContent(view)
     }
 
-    /// A measuring view reported: record the height, size the view to it as
-    /// a live one would be, and wait for the reports to settle.
+    /// A measuring view reported: size the view to it as a live one would
+    /// be, keep it, and wait for the reports to settle.
     private func htmlBlockMeasurement(_ html: String, didReport reported: CGFloat) {
         guard let measurement = htmlBlockMeasurements[html], reported.isFinite, reported >= 0 else { return }
         measurement.host.frame.size.height = max(ceil(reported), 1)
-        htmlBlock(html, didReportHeight: reported, layout: measurement.layout)
+        measurement.lastReported = reported
         scheduleHTMLBlockMeasurementSettle(html)
     }
 
@@ -474,6 +523,9 @@ extension NativeTextView {
     private func finishHTMLBlockMeasurement(_ html: String) {
         guard let measurement = htmlBlockMeasurements.removeValue(forKey: html) else { return }
         measurement.invalidateTimers()
+        if let reported = measurement.lastReported {
+            htmlBlock(html, didReportHeight: reported, layout: measurement.layout)
+        }
         // Measured for this layout even if it never reported (it may draw
         // nothing, or fail to load), so it isn't measured over and over.
         if let bridge = layoutBridge, bridge.htmlBlockMeasuredLayouts[html].map({ $0.matches(measurement.layout) }) != true {

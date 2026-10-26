@@ -52,6 +52,40 @@ private final class PoolingRenderer: HTMLBlockRenderer, @unchecked Sendable {
     }
 }
 
+/// Reports a sequence of heights for every view, as a loading page does (a
+/// small one before its images arrive, then the real one), and says a view
+/// has settled only after its last report.
+private final class LoadingRenderer: HTMLBlockRenderer, @unchecked Sendable {
+    let heights: [CGFloat]
+    @MainActor private var settled: Set<ObjectIdentifier> = []
+
+    init(heights: [CGFloat]) { self.heights = heights }
+
+    var isEnabled: Bool { true }
+
+    @MainActor
+    func makeView(for block: HTMLBlockContent, heightDidChange: @escaping @MainActor (CGFloat) -> Void) -> NSView {
+        let view = NSView()
+        let id = ObjectIdentifier(view)
+        for (index, height) in heights.enumerated() {
+            let isLast = index == heights.count - 1
+            Timer.scheduledTimer(withTimeInterval: 0.05 * Double(index + 1), repeats: false) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    heightDidChange(height)
+                    if isLast { self?.settled.insert(id) }
+                }
+            }
+        }
+        return view
+    }
+
+    @MainActor
+    func update(_ view: NSView, for block: HTMLBlockContent) {}
+
+    @MainActor
+    func hasSettled(_ view: NSView) -> Bool { settled.contains(ObjectIdentifier(view)) }
+}
+
 @MainActor
 @Suite("HTML block views follow the screen", .serialized)
 struct HTMLBlockViewportTests {
@@ -73,7 +107,7 @@ struct HTMLBlockViewportTests {
         }
     }
 
-    private func makeEditor(renderer: PoolingRenderer) throws -> Editor {
+    private func makeEditor(renderer: any HTMLBlockRenderer) throws -> Editor {
         _ = NSApplication.shared
         NativeTextView.htmlBlockMeasurementSettleDelay = 0.05
         let text = Self.document
@@ -245,6 +279,38 @@ struct HTMLBlockViewportTests {
         editor.scrollView.setFrameSize(NSSize(width: 600, height: 400))
         drain()
         #expect(liveHTML(editor) == [Self.top])
+    }
+
+    @Test("A block measured off screen records only its settled height, not the passing ones")
+    func measurementRecordsSettledHeight() throws {
+        // A loading page: 50 before its images arrive, then 260.
+        let editor = try makeEditor(renderer: LoadingRenderer(heights: [50, 260]))
+        var seen: Set<CGFloat> = []
+        for _ in 0..<40 {
+            drain(0.02)
+            if let height = editor.bridge.htmlBlockHeights[Self.bottom] { seen.insert(height) }
+        }
+        drain()
+        #expect(editor.bridge.htmlBlockHeights[Self.bottom] == 260)
+        #expect(!seen.contains(50))
+    }
+
+    @Test("A live view of an already measured block holds its passing heights until it settles")
+    func liveViewHoldsUntilSettled() throws {
+        let editor = try makeEditor(renderer: LoadingRenderer(heights: [50, 260]))
+        drain(1.0)
+        #expect(editor.bridge.htmlBlockHeights[Self.bottom] == 260)
+        sizeToContent(editor)
+
+        // Scroll to it: its live view loads again, passing through 50.
+        scroll(editor, toY: editor.textView.frame.height - 400)
+        var seen: Set<CGFloat> = []
+        for _ in 0..<40 {
+            drain(0.02)
+            if let height = editor.bridge.htmlBlockHeights[Self.bottom] { seen.insert(height) }
+        }
+        #expect(liveHTML(editor).contains(Self.bottom))
+        #expect(seen == [260])
     }
 
     @Test("A view whose block's source is being edited survives scrolling nearby")
