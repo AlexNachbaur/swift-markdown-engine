@@ -4,13 +4,16 @@
 //
 //  Hosts the views an `HTMLBlockRenderer` makes for raw HTML blocks, over the
 //  space `styleHTMLBlocks` reserves for them. The pattern is the wide-table
-//  overlay's: after a restyle, walk the storage for tagged anchors and create,
-//  move or hide one subview per anchor.
+//  overlay's: after a restyle, and as the document scrolls, walk the storage
+//  for tagged anchors and create, move, hide or release one subview per anchor.
 //
-//  A view's content lays out asynchronously, so its height arrives later:
-//  the view reports it, the height is recorded on the `LayoutBridge` (which
-//  the styler reads synchronously), and only that block is restyled. Styling
-//  never waits on a view.
+//  Only blocks on or near the screen have a view; the rest keep the space
+//  their last measured height reserves. A view's content lays out
+//  asynchronously, so its height arrives later: the view reports it, the
+//  height is recorded on the `LayoutBridge` with the column width it was
+//  measured at (the styler reads it synchronously), and only that block is
+//  restyled. Styling never waits on a view. Blocks with no height for the
+//  current width are measured ahead of time by views placed off screen.
 //
 
 import AppKit
@@ -21,7 +24,7 @@ import AppKit
 /// the block behaves like the rest of the text: in edit mode a click anywhere
 /// on it puts the caret into the block (revealing its source); read-only, the
 /// content gets its clicks (links, text selection). Scrolling always moves
-/// the document.
+/// the document. A measuring host sits off screen and takes no events.
 final class HTMLBlockHostView: NSView {
     let key: String
     /// The block's HTML, which keys its reported height.
@@ -34,6 +37,10 @@ final class HTMLBlockHostView: NSView {
     var drawnWith: HTMLBlockDrawingState
     /// The reconcile generation in which this block was last rendered.
     var lastSeenGeneration: Int
+    /// Off screen, measuring a block's height ahead of scrolling.
+    var isMeasuring = false
+    /// Cleared when the view goes back to the renderer; reports after that are ignored.
+    var isActive = true
 
     init(key: String, html: String, anchorLocation: Int, ownerTextView: NativeTextView, drawnWith: HTMLBlockDrawingState, generation: Int) {
         self.key = key
@@ -57,10 +64,18 @@ final class HTMLBlockHostView: NSView {
         content = view
     }
 
+    /// Takes the content out, for handing back to the renderer.
+    func takeContent() -> NSView? {
+        let view = content
+        view?.removeFromSuperview()
+        content = nil
+        return view
+    }
+
     override func hitTest(_ point: NSPoint) -> NSView? {
         // Hidden while the caret is in the block (or after it was edited away):
         // clicks belong to the source text under it.
-        guard !isHidden else { return nil }
+        guard !isHidden, !isMeasuring else { return nil }
         guard let owner = ownerTextView, owner.isEditable else { return super.hitTest(point) }
         // `point` is in the superview's coordinates.
         return frame.contains(point) ? self : nil
@@ -80,6 +95,25 @@ final class HTMLBlockHostView: NSView {
         } else {
             super.scrollWheel(with: event)
         }
+    }
+}
+
+/// An off-screen view measuring one block's height at a column width. It is
+/// done once its reports have settled, or at a deadline if they never do.
+final class HTMLBlockMeasurement {
+    let host: HTMLBlockHostView
+    let width: CGFloat
+    var settleTimer: Timer?
+    var deadlineTimer: Timer?
+
+    init(host: HTMLBlockHostView, width: CGFloat) {
+        self.host = host
+        self.width = width
+    }
+
+    func invalidateTimers() {
+        settleTimer?.invalidate()
+        deadlineTimer?.invalidate()
     }
 }
 
@@ -111,12 +145,33 @@ extension MarkdownEditorServices {
 
 extension NativeTextView {
 
-    /// Hidden views unseen for this many reconciles are dropped. Reconciles run
-    /// per restyle, so a view survives the caret passing through its block.
+    /// Hidden views unseen for this many reconciles are released. Reconciles
+    /// run per restyle, so a view survives the caret passing through its block.
     private static let htmlBlockViewRetention = 32
 
-    /// Walk storage; create / position / hide views to match the rendered
-    /// HTML-block anchors.
+    /// How many blocks are measured off screen at once.
+    static let htmlBlockMeasurementLimit = 2
+    /// A measurement is done once its view has reported nothing new for this long…
+    static var htmlBlockMeasurementSettleDelay: TimeInterval = 0.4
+    /// …or this long after it started, whichever comes first.
+    static var htmlBlockMeasurementDeadline: TimeInterval = 4
+
+    /// Where measuring views sit: far left of anything the clip view shows.
+    private static let htmlBlockMeasuringOriginX: CGFloat = -100_000
+
+    /// The part of the document whose blocks get a live view: the visible
+    /// rect and a screen's height above and below it. Everything when the
+    /// view isn't on screen to tell.
+    private var htmlBlockLiveRect: NSRect {
+        let visible = visibleRect
+        guard !visible.isEmpty else { return .infinite }
+        let margin = max(visible.height, 200)
+        return visible.insetBy(dx: -visible.width, dy: -margin)
+    }
+
+    /// Walk storage; create / position / hide / release views to match the
+    /// rendered HTML-block anchors and the part of the document on screen;
+    /// start measuring blocks that need a height.
     func updateHTMLBlockViews() {
         let renderer = configuration.services.htmlBlocks
         guard renderer.isEnabled,
@@ -134,11 +189,14 @@ extension NativeTextView {
         }
         htmlBlockReconcileGeneration &+= 1
         let generation = htmlBlockReconcileGeneration
+        let liveRect = htmlBlockLiveRect
         defer { pruneHTMLBlockHeights(keeping: anchors.map(\.anchor.html)) }
         guard let last = anchors.last else {
-            hideHTMLBlockViews(unseenSince: generation)
+            hideHTMLBlockViews(unseenSince: generation, liveRect: liveRect, renderer: renderer)
+            cancelHTMLBlockMeasurements(keeping: [], renderer: renderer)
             return
         }
+        observeHTMLBlockScrolling()
 
         // Settle layout first, through the last block only: stale fragments
         // would put views at old Ys, and text after it doesn't move them.
@@ -151,6 +209,8 @@ extension NativeTextView {
         }
         let width = max(container.size.width - container.lineFragmentPadding * 2, 1)
         var occurrences: [String: Int] = [:]
+        var liveHTML: Set<String> = []
+        var needsMeasuring: [(html: String, content: HTMLBlockContent, drawingState: HTMLBlockDrawingState, distance: CGFloat)] = []
         for (range, anchor) in anchors {
             let occurrence = occurrences[anchor.html, default: 0]
             occurrences[anchor.html] = occurrence + 1
@@ -177,6 +237,17 @@ extension NativeTextView {
                 theme: configuration.theme
             )
 
+            guard frame.intersects(liveRect) else {
+                // Far from the screen: no view, only the reserved space.
+                if let host = htmlBlockViews[key] { releaseHTMLBlockHost(host, renderer: renderer) }
+                if !hasHTMLBlockHeight(anchor.html, atWidth: width) {
+                    let distance = min(abs(frame.minY - liveRect.midY), abs(frame.maxY - liveRect.midY))
+                    needsMeasuring.append((anchor.html, content, drawingState, distance))
+                }
+                continue
+            }
+            liveHTML.insert(anchor.html)
+
             if let host = htmlBlockViews[key] {
                 host.lastSeenGeneration = generation
                 host.anchorTextLocation = range.location
@@ -201,56 +272,203 @@ extension NativeTextView {
                 )
                 host.frame = frame
                 let html = anchor.html
-                let view = renderer.makeView(for: content) { [weak self] height in
-                    self?.htmlBlock(html, didReportHeight: height)
+                let view = renderer.makeView(for: content) { [weak self, weak host] reported in
+                    guard let self, let host, host.isActive else { return }
+                    self.htmlBlock(html, didReportHeight: reported, width: host.frame.width)
                 }
                 host.setContent(view)
                 addSubview(host)
                 htmlBlockViews[key] = host
             }
         }
-        hideHTMLBlockViews(unseenSince: generation)
+        hideHTMLBlockViews(unseenSince: generation, liveRect: liveRect, renderer: renderer)
+
+        // A live view measures its block itself; measure the rest nearest first.
+        let present = Set(anchors.map(\.anchor.html))
+        cancelHTMLBlockMeasurements(keeping: present.subtracting(liveHTML), renderer: renderer)
+        var queued: Set<String> = []
+        for candidate in needsMeasuring.sorted(by: { $0.distance < $1.distance }) {
+            guard htmlBlockMeasurements.count < Self.htmlBlockMeasurementLimit else { break }
+            guard !liveHTML.contains(candidate.html), htmlBlockMeasurements[candidate.html] == nil,
+                  queued.insert(candidate.html).inserted else { continue }
+            startHTMLBlockMeasurement(
+                candidate.html,
+                content: candidate.content,
+                drawingState: candidate.drawingState,
+                width: width,
+                generation: generation,
+                renderer: renderer
+            )
+        }
+    }
+
+    private func hasHTMLBlockHeight(_ html: String, atWidth width: CGFloat) -> Bool {
+        guard let bridge = layoutBridge, bridge.htmlBlockHeights[html] != nil,
+              let measured = bridge.htmlBlockMeasuredWidths[html] else { return false }
+        return abs(measured - width) < 0.5
     }
 
     /// Hides views whose block is not rendered right now (the caret is in it,
-    /// or it was edited away), and drops the ones unseen for a while.
-    private func hideHTMLBlockViews(unseenSince generation: Int) {
-        for (key, host) in htmlBlockViews where host.lastSeenGeneration != generation {
+    /// or it was edited away), and releases the ones unseen for a while or far
+    /// from the screen.
+    private func hideHTMLBlockViews(unseenSince generation: Int, liveRect: NSRect, renderer: any HTMLBlockRenderer) {
+        for (_, host) in htmlBlockViews where host.lastSeenGeneration != generation {
             if !host.isHidden {
                 host.isHidden = true
                 setNeedsDisplay(host.frame)
             }
-            if generation &- host.lastSeenGeneration > Self.htmlBlockViewRetention {
-                host.removeFromSuperview()
-                htmlBlockViews.removeValue(forKey: key)
+            if generation &- host.lastSeenGeneration > Self.htmlBlockViewRetention || !host.frame.intersects(liveRect) {
+                releaseHTMLBlockHost(host, renderer: renderer)
             }
         }
+    }
+
+    /// Takes a host out and gives its view back to the renderer.
+    private func releaseHTMLBlockHost(_ host: HTMLBlockHostView, renderer: any HTMLBlockRenderer) {
+        host.isActive = false
+        if htmlBlockViews[host.key] === host { htmlBlockViews.removeValue(forKey: host.key) }
+        if !host.isHidden { setNeedsDisplay(host.frame) }
+        host.removeFromSuperview()
+        if let view = host.takeContent() { renderer.releaseView(view) }
     }
 
     /// Forgets reported heights for HTML no longer in the document or held by
     /// a retained view, so a block edited many times leaves no trail of them.
     private func pruneHTMLBlockHeights(keeping rendered: [String]) {
         guard let bridge = layoutBridge, !bridge.htmlBlockHeights.isEmpty else { return }
-        let live = Set(rendered).union(htmlBlockViews.values.map(\.html))
+        let live = Set(rendered)
+            .union(htmlBlockViews.values.map(\.html))
+            .union(htmlBlockMeasurements.keys)
         for html in bridge.htmlBlockHeights.keys where !live.contains(html) {
             bridge.htmlBlockHeights.removeValue(forKey: html)
+            bridge.htmlBlockMeasuredWidths.removeValue(forKey: html)
         }
     }
 
-    /// Drop every hosted view synchronously (document switch, renderer off).
+    /// Releases every hosted and measuring view synchronously (document
+    /// switch, renderer change), back to the renderer configured now.
     func removeAllHTMLBlockViews() {
-        for (_, host) in htmlBlockViews { host.removeFromSuperview() }
+        let renderer = configuration.services.htmlBlocks
+        for (_, host) in htmlBlockViews { releaseHTMLBlockHost(host, renderer: renderer) }
         htmlBlockViews.removeAll()
+        cancelHTMLBlockMeasurements(keeping: [], renderer: renderer)
         htmlBlocksAwaitingRestyle.removeAll()
+    }
+
+    // MARK: Scrolling
+
+    /// Reconciles as the document scrolls, so views follow the screen.
+    private func observeHTMLBlockScrolling() {
+        guard let clipView = enclosingScrollView?.contentView, clipView !== htmlBlockObservedClipView else { return }
+        if let old = htmlBlockObservedClipView {
+            NotificationCenter.default.removeObserver(self, name: NSView.boundsDidChangeNotification, object: old)
+        }
+        clipView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(htmlBlockClipViewBoundsDidChange(_:)),
+            name: NSView.boundsDidChangeNotification,
+            object: clipView
+        )
+        htmlBlockObservedClipView = clipView
+    }
+
+    @objc private func htmlBlockClipViewBoundsDidChange(_ notification: Notification) {
+        guard !htmlBlockViews.isEmpty || !htmlBlockMeasurements.isEmpty || layoutBridge?.htmlBlockHeights.isEmpty == false else { return }
+        scheduleHTMLBlockReconcile()
+    }
+
+    /// One reconcile per run-loop turn, however many scroll steps arrive in it.
+    func scheduleHTMLBlockReconcile() {
+        guard !htmlBlockReconcileScheduled else { return }
+        htmlBlockReconcileScheduled = true
+        RunLoop.main.perform(inModes: [.default, .eventTracking]) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.htmlBlockReconcileScheduled = false
+                self.updateHTMLBlockViews()
+            }
+        }
+    }
+
+    // MARK: Measuring
+
+    private func startHTMLBlockMeasurement(
+        _ html: String,
+        content: HTMLBlockContent,
+        drawingState: HTMLBlockDrawingState,
+        width: CGFloat,
+        generation: Int,
+        renderer: any HTMLBlockRenderer
+    ) {
+        let host = HTMLBlockHostView(
+            key: "measuring#\(html)",
+            html: html,
+            anchorLocation: -1,
+            ownerTextView: self,
+            drawnWith: drawingState,
+            generation: generation
+        )
+        host.isMeasuring = true
+        let startHeight = layoutBridge?.htmlBlockHeights[html] ?? baseFont.pointSize * 1.4
+        host.frame = NSRect(x: Self.htmlBlockMeasuringOriginX - width, y: 0, width: width, height: max(startHeight, 1))
+        let measurement = HTMLBlockMeasurement(host: host, width: width)
+        htmlBlockMeasurements[html] = measurement
+        addSubview(host)
+        measurement.deadlineTimer = Timer.scheduledTimer(withTimeInterval: Self.htmlBlockMeasurementDeadline, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.finishHTMLBlockMeasurement(html) }
+        }
+        let view = renderer.makeView(for: content) { [weak self, weak host] reported in
+            guard let self, let host, host.isActive else { return }
+            self.htmlBlockMeasurement(html, didReport: reported)
+        }
+        host.setContent(view)
+    }
+
+    /// A measuring view reported: record the height, size the view to it as
+    /// a live one would be, and wait for the reports to settle.
+    private func htmlBlockMeasurement(_ html: String, didReport reported: CGFloat) {
+        guard let measurement = htmlBlockMeasurements[html], reported.isFinite, reported > 0 else { return }
+        measurement.host.frame.size.height = ceil(reported)
+        htmlBlock(html, didReportHeight: reported, width: measurement.width)
+        measurement.settleTimer?.invalidate()
+        measurement.settleTimer = Timer.scheduledTimer(withTimeInterval: Self.htmlBlockMeasurementSettleDelay, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.finishHTMLBlockMeasurement(html) }
+        }
+    }
+
+    private func finishHTMLBlockMeasurement(_ html: String) {
+        guard let measurement = htmlBlockMeasurements.removeValue(forKey: html) else { return }
+        measurement.invalidateTimers()
+        releaseMeasuringHost(measurement.host)
+        // Start the next one.
+        scheduleHTMLBlockReconcile()
+    }
+
+    /// Stops measurements for HTML not in `keeping` (edited away, or now on
+    /// screen, where a live view measures it).
+    private func cancelHTMLBlockMeasurements(keeping: Set<String>, renderer: any HTMLBlockRenderer) {
+        for (html, measurement) in htmlBlockMeasurements where !keeping.contains(html) {
+            htmlBlockMeasurements.removeValue(forKey: html)
+            measurement.invalidateTimers()
+            releaseMeasuringHost(measurement.host, renderer: renderer)
+        }
+    }
+
+    private func releaseMeasuringHost(_ host: HTMLBlockHostView, renderer: (any HTMLBlockRenderer)? = nil) {
+        host.isActive = false
+        host.removeFromSuperview()
+        if let view = host.takeContent() { (renderer ?? configuration.services.htmlBlocks).releaseView(view) }
     }
 
     // MARK: Reported heights
 
-    /// Records a block's new content height and restyles that block once per
-    /// run-loop turn, however many views report in it.
-    func htmlBlock(_ html: String, didReportHeight reported: CGFloat) {
+    /// Records a block's new content height at `width` and restyles that
+    /// block once per run-loop turn, however many views report in it.
+    func htmlBlock(_ html: String, didReportHeight reported: CGFloat, width: CGFloat) {
         guard let bridge = layoutBridge, reported.isFinite, reported > 0 else { return }
         let height = ceil(reported)
+        bridge.htmlBlockMeasuredWidths[html] = width
         if let current = bridge.htmlBlockHeights[html], abs(current - height) < 0.5 { return }
         bridge.htmlBlockHeights[html] = height
         let alreadyScheduled = !htmlBlocksAwaitingRestyle.isEmpty
@@ -274,7 +492,44 @@ extension NativeTextView {
             .filter { pending.contains(ns.substring(with: $0.token.range)) }
             .map { ns.paragraphRange(for: $0.token.range) }
         guard !paragraphs.isEmpty else { return }
+        // A block above the screen changing height would move what the reader
+        // is looking at; keep the first visible line where it is.
+        let anchor = topVisibleTextAnchor()
         coordinator.restyleParagraphs(paragraphs, in: self)
+        if let anchor, paragraphs.contains(where: { $0.location < anchor.offset }) {
+            keepTextAnchorInPlace(anchor)
+        }
         updateHTMLBlockViews()
+    }
+
+    // MARK: Scroll anchoring
+
+    /// The first layout fragment at the top of the visible rect, by document
+    /// offset, and where it is now.
+    private func topVisibleTextAnchor() -> (offset: Int, y: CGFloat)? {
+        let visible = visibleRect
+        guard !visible.isEmpty, visible.minY > 0,
+              let tlm = textLayoutManager,
+              let content = tlm.textContentManager else { return nil }
+        let top = CGPoint(x: 0, y: visible.minY - textContainerOrigin.y)
+        guard let fragment = tlm.textLayoutFragment(for: top) else { return nil }
+        let offset = content.offset(from: content.documentRange.location, to: fragment.rangeInElement.location)
+        return (offset, fragment.layoutFragmentFrame.minY)
+    }
+
+    /// Scrolls by however far the anchor's fragment moved.
+    private func keepTextAnchorInPlace(_ anchor: (offset: Int, y: CGFloat)) {
+        guard let tlm = textLayoutManager,
+              let content = tlm.textContentManager,
+              let location = content.location(content.documentRange.location, offsetBy: anchor.offset),
+              let throughAnchor = NSTextRange(location: content.documentRange.location, end: location),
+              let scrollView = enclosingScrollView else { return }
+        tlm.ensureLayout(for: throughAnchor)
+        guard let fragment = tlm.textLayoutFragment(for: location) else { return }
+        let delta = fragment.layoutFragmentFrame.minY - anchor.y
+        guard abs(delta) >= 0.5 else { return }
+        let clipView = scrollView.contentView
+        clipView.scroll(to: NSPoint(x: clipView.bounds.origin.x, y: clipView.bounds.origin.y + delta))
+        scrollView.reflectScrolledClipView(clipView)
     }
 }

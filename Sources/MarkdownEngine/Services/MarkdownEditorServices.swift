@@ -215,14 +215,21 @@ public struct NoOpLatexRenderer: LatexRenderer {
 /// default ``NoOpHTMLBlockRenderer``, HTML stays literal text, exactly as
 /// before, and documents parse identically.
 ///
-/// The engine owns layout: it hosts one view per block at the text column's
-/// width, reserves the block's height in the text flow so the content below
-/// moves down, and hides the view while the caret is inside the block so the
-/// source can be edited. The renderer only draws: it builds the view and
-/// reports the height its content needs, whenever that changes. Content such
-/// as a web page lays out asynchronously, so the engine never waits for a
-/// height — it reserves the last one reported and restyles the block when a
-/// new one arrives. HTML comments render as nothing and get no view.
+/// The engine owns layout: it reserves each block's height in the text flow so
+/// the content below moves down, hosts a view at the text column's width for
+/// the blocks on or near the screen, and hides a view while the caret is
+/// inside its block so the source can be edited. The renderer only draws: it
+/// builds a view and reports the height its content needs, whenever that
+/// changes. Content such as a web page lays out asynchronously, so the engine
+/// never waits for a height — it reserves the last one reported, at the
+/// column width it was measured at, and restyles the block when a new one
+/// arrives. HTML comments render as nothing and get no view.
+///
+/// Views come and go with scrolling: a block that leaves the neighborhood of
+/// the screen gives its view back through ``releaseView(_:)``. Blocks with no
+/// height for the current width are measured ahead of time with views placed
+/// off screen, a couple at a time, nearest first, so scrolling to them doesn't
+/// move the text.
 ///
 /// The `MarkdownEngineWebKit` product ships a WebKit-based implementation.
 public protocol HTMLBlockRenderer: Sendable {
@@ -244,6 +251,15 @@ public protocol HTMLBlockRenderer: Sendable {
     @MainActor
     func update(_ view: NSView, for block: HTMLBlockContent)
 
+    /// Hands back a view made by ``makeView(for:heightDidChange:)`` that the
+    /// editor no longer shows: its block scrolled well out of view, was
+    /// measured in the background, or was edited away. The editor has taken
+    /// it out of its view hierarchy and ignores its height reports from now
+    /// on. A renderer can keep it and hand it out again from `makeView`, as
+    /// table views reuse cells; the default does nothing.
+    @MainActor
+    func releaseView(_ view: NSView)
+
     /// Coarse fingerprint of what the renderer draws with, such as the
     /// resources it can read or its stylesheet. When a new configuration
     /// carries a different value, every view is made again, so content that
@@ -253,6 +269,7 @@ public protocol HTMLBlockRenderer: Sendable {
 
 public extension HTMLBlockRenderer {
     func fingerprint() -> AnyHashable { 0 }
+    @MainActor func releaseView(_ view: NSView) {}
 }
 
 /// What an ``HTMLBlockRenderer`` draws: the block's HTML and the document's

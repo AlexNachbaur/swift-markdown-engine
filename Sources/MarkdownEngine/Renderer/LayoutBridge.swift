@@ -23,6 +23,9 @@ final class LayoutBridge {
     /// writes them as views report and restyles the block. Lives here because
     /// the bridge is the one per-view object every styling pass already holds.
     var htmlBlockHeights: [String: CGFloat] = [:]
+    /// The column width each of `htmlBlockHeights` was measured at. A height
+    /// from another width is still the best estimate, but it is measured again.
+    var htmlBlockMeasuredWidths: [String: CGFloat] = [:]
 
     init(_ textLayoutManager: NSTextLayoutManager) {
         self.textLayoutManager = textLayoutManager

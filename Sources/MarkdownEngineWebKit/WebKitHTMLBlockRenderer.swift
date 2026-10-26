@@ -37,12 +37,21 @@ import UniformTypeIdentifiers
 /// `allowsRemoteContent` is `false`. Loading it tells the server that the
 /// document was opened, so an app may want to ask first: with remote content
 /// off, `onBlockedRemoteContent` reports each URL a block was kept from loading.
+///
+/// Web views are reused. Each brings its own WebKit content process, so every
+/// renderer in the app, in every window, draws from one shared pool: a view
+/// the editor gives back through ``releaseView(_:)`` is kept (up to a few, and
+/// none under memory pressure) and handed to the next block that needs one,
+/// whichever document it is in. A new web view is made only when the pool has
+/// none free. Each use reloads the page with that renderer's resources,
+/// scripts and remote-content switch, so nothing carries over between uses
+/// but the process. Pooled views keep no cookies or caches on disk.
 public final class WebKitHTMLBlockRenderer: HTMLBlockRenderer, @unchecked Sendable {
     /// Reads a resource a block refers to; `nil` when it can't be read.
     public typealias ResourceLoader = @Sendable (URL) -> Data?
 
     private let baseURL: URL?
-    private let schemeHandler: ResourceSchemeHandler
+    private let resourceLoader: ResourceLoader
     private let stylesheet: String
     private let allowsJavaScript: Bool
     private let allowsRemoteContent: Bool
@@ -89,10 +98,7 @@ public final class WebKitHTMLBlockRenderer: HTMLBlockRenderer, @unchecked Sendab
         openURL: (@MainActor @Sendable (URL) -> Void)? = nil
     ) {
         self.baseURL = baseURL
-        self.schemeHandler = ResourceSchemeHandler(
-            load: resourceLoader ?? Self.folderReader(for: baseURL),
-            contentSecurityPolicy: allowsRemoteContent ? nil : HTMLBlockDocument.localOnlyPolicy
-        )
+        self.resourceLoader = resourceLoader ?? Self.folderReader(for: baseURL)
         self.stylesheet = stylesheet
         self.allowsJavaScript = allowsJavaScript
         self.allowsRemoteContent = allowsRemoteContent
@@ -128,51 +134,24 @@ public final class WebKitHTMLBlockRenderer: HTMLBlockRenderer, @unchecked Sendab
         ]
     }
 
-    /// Makes a web view showing `block`; see ``HTMLBlockRenderer/makeView(for:heightDidChange:)``.
+    /// Shows `block` in a web view from the shared pool, or a new one when
+    /// none is free; see ``HTMLBlockRenderer/makeView(for:heightDidChange:)``.
     @MainActor
     public func makeView(for block: HTMLBlockContent, heightDidChange: @escaping @MainActor (CGFloat) -> Void) -> NSView {
-        let configuration = WKWebViewConfiguration()
-        configuration.setURLSchemeHandler(schemeHandler, forURLScheme: ResourceSchemeHandler.scheme)
-        configuration.defaultWebpagePreferences.allowsContentJavaScript = allowsJavaScript
-        configuration.suppressesIncrementalRendering = false
-
-        let heightHandler = HeightMessageHandler(heightDidChange)
-        let controller = configuration.userContentController
-        controller.add(heightHandler, contentWorld: .defaultClient, name: HeightMessageHandler.name)
-        controller.addUserScript(WKUserScript(
-            source: HTMLBlockDocument.heightScript,
-            injectionTime: .atDocumentEnd,
-            forMainFrameOnly: true,
-            in: .defaultClient
-        ))
-        if !allowsRemoteContent {
-            // Violations fire while the body parses, so listen from the start,
-            // in frames too: a local page in a frame carries the same policy.
-            let blockedHandler = BlockedContentMessageHandler(onBlockedRemoteContent)
-            controller.add(blockedHandler, contentWorld: .defaultClient, name: BlockedContentMessageHandler.name)
-            controller.addUserScript(WKUserScript(
-                source: HTMLBlockDocument.blockedContentScript,
-                injectionTime: .atDocumentStart,
-                forMainFrameOnly: false,
-                in: .defaultClient
-            ))
-        }
-
-        let navigation = NavigationPolicy(openURL: openURL, documentBaseURL: baseURL)
-        let webView = HTMLBlockWebView(frame: .zero, configuration: configuration, navigation: navigation)
-        let page = pageOptions
-        if allowsRemoteContent {
-            webView.load(block, page: page)
-        } else {
-            // The policy in the page doesn't govern everything (`preconnect`
-            // opens a connection regardless), so a content rule list blocks
-            // every web request as well. It compiles once, asynchronously;
-            // the page waits for it.
-            RemoteContentRuleList.whenReady { ruleList in
-                if let ruleList { controller.add(ruleList) }
-                webView.load(block, page: page)
-            }
-        }
+        let webView = HTMLBlockWebViewPool.shared.dequeue()
+        webView.begin(
+            HTMLBlockLease(
+                baseURL: baseURL,
+                resourceLoader: resourceLoader,
+                stylesheet: stylesheet,
+                allowsJavaScript: allowsJavaScript,
+                allowsRemoteContent: allowsRemoteContent,
+                heightDidChange: heightDidChange,
+                onBlockedRemoteContent: onBlockedRemoteContent,
+                openURL: openURL
+            ),
+            showing: block
+        )
         return webView
     }
 
@@ -180,11 +159,109 @@ public final class WebKitHTMLBlockRenderer: HTMLBlockRenderer, @unchecked Sendab
     @MainActor
     public func update(_ view: NSView, for block: HTMLBlockContent) {
         guard let webView = view as? HTMLBlockWebView else { return }
-        webView.load(block, page: pageOptions)
+        webView.show(block)
     }
 
-    private var pageOptions: HTMLBlockPageOptions {
+    /// Puts `view` back in the shared pool for the next block, in any window.
+    @MainActor
+    public func releaseView(_ view: NSView) {
+        guard let webView = view as? HTMLBlockWebView else { return }
+        HTMLBlockWebViewPool.shared.enqueue(webView)
+    }
+}
+
+/// What one use of a pooled web view draws with: one renderer's resources,
+/// scripts and switches, and the callback for one block's height.
+@MainActor
+final class HTMLBlockLease {
+    let baseURL: URL?
+    let resourceLoader: WebKitHTMLBlockRenderer.ResourceLoader
+    let stylesheet: String
+    let allowsJavaScript: Bool
+    let allowsRemoteContent: Bool
+    let heightDidChange: @MainActor (CGFloat) -> Void
+    let onBlockedRemoteContent: (@MainActor @Sendable (URL) -> Void)?
+    let openURL: @MainActor @Sendable (URL) -> Void
+    /// The host this use's resources load under. WebKit caches loads by URL,
+    /// so a fresh host per use keeps a reused view from showing what another
+    /// document, or an older copy of a file, loaded at the same path.
+    let resourceHost = "use-" + UUID().uuidString.lowercased()
+
+    init(
+        baseURL: URL?,
+        resourceLoader: @escaping WebKitHTMLBlockRenderer.ResourceLoader,
+        stylesheet: String,
+        allowsJavaScript: Bool,
+        allowsRemoteContent: Bool,
+        heightDidChange: @escaping @MainActor (CGFloat) -> Void,
+        onBlockedRemoteContent: (@MainActor @Sendable (URL) -> Void)?,
+        openURL: @escaping @MainActor @Sendable (URL) -> Void
+    ) {
+        self.baseURL = baseURL
+        self.resourceLoader = resourceLoader
+        self.stylesheet = stylesheet
+        self.allowsJavaScript = allowsJavaScript
+        self.allowsRemoteContent = allowsRemoteContent
+        self.heightDidChange = heightDidChange
+        self.onBlockedRemoteContent = onBlockedRemoteContent
+        self.openURL = openURL
+    }
+
+    /// Sent with every local file, so a local page shown in a frame is held
+    /// to the same policy as the block's own page.
+    var contentSecurityPolicy: String? {
+        allowsRemoteContent ? nil : HTMLBlockDocument.localOnlyPolicy
+    }
+
+    var pageOptions: HTMLBlockPageOptions {
         HTMLBlockPageOptions(stylesheet: stylesheet, baseURL: baseURL, allowsRemoteContent: allowsRemoteContent)
+    }
+}
+
+/// The app-wide reuse pool of block web views, shared by every renderer in
+/// every window. A view is made only when none is idle; an idle view is kept
+/// up to `idleLimit`, and none are kept under memory pressure.
+@MainActor
+final class HTMLBlockWebViewPool {
+    static let shared = HTMLBlockWebViewPool()
+
+    /// Idle views kept for reuse; any beyond this are let go.
+    var idleLimit = 8
+    private(set) var idle: [HTMLBlockWebView] = []
+    /// Web views made over the pool's life, for measuring reuse.
+    private(set) var createdCount = 0
+    private var memoryPressure: DispatchSourceMemoryPressure?
+
+    /// Pooled views keep cookies and caches in memory only, shared among
+    /// them, so nothing a document loads is written to disk.
+    private let dataStore = WKWebsiteDataStore.nonPersistent()
+
+    private init() {
+        let source = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
+        source.setEventHandler { [weak self] in
+            MainActor.assumeIsolated { self?.purge() }
+        }
+        source.resume()
+        memoryPressure = source
+    }
+
+    /// An idle view, or a new one when none is free.
+    func dequeue() -> HTMLBlockWebView {
+        if let webView = idle.popLast() { return webView }
+        createdCount += 1
+        return HTMLBlockWebView(dataStore: dataStore)
+    }
+
+    /// Takes a view back: it stops showing its block and waits for the next.
+    func enqueue(_ webView: HTMLBlockWebView) {
+        webView.end()
+        guard !idle.contains(where: { $0 === webView }), idle.count < idleLimit else { return }
+        idle.append(webView)
+    }
+
+    /// Lets every idle view go, and its content process with it.
+    func purge() {
+        idle.removeAll()
     }
 }
 
@@ -241,16 +318,49 @@ struct HTMLBlockPageOptions {
 // MARK: - Web view
 
 /// A web view that lets the document scroll over it, draws no background of
-/// its own, and follows the editor's light or dark appearance.
+/// its own, and follows the editor's light or dark appearance. It lives in the
+/// pool and shows one block per lease; everything a use depends on (the
+/// loader, scripts, remote-content switch, height callback) comes from the
+/// lease, so the same view can serve any document.
 final class HTMLBlockWebView: WKWebView {
     // `navigationDelegate` is weak; the view keeps its policy alive.
-    private let navigation: NavigationPolicy
+    private let navigation = NavigationPolicy()
+    private let contentController: WKUserContentController
+    /// The current use; `nil` while idle in the pool.
+    private(set) var lease: HTMLBlockLease?
     private var block: HTMLBlockContent?
-    private var page = HTMLBlockPageOptions()
 
-    init(frame: NSRect, configuration: WKWebViewConfiguration, navigation: NavigationPolicy) {
-        self.navigation = navigation
-        super.init(frame: frame, configuration: configuration)
+    init(dataStore: WKWebsiteDataStore) {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = dataStore
+        configuration.setURLSchemeHandler(ResourceSchemeHandler.shared, forURLScheme: ResourceSchemeHandler.scheme)
+        // Each navigation sets it from the lease (`NavigationPolicy`).
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
+        configuration.suppressesIncrementalRendering = false
+        let controller = configuration.userContentController
+        controller.addUserScript(WKUserScript(
+            source: HTMLBlockDocument.heightScript,
+            injectionTime: .atDocumentEnd,
+            forMainFrameOnly: true,
+            in: .defaultClient
+        ))
+        // Violations fire while the body parses, so listen from the start, in
+        // frames too: a local page in a frame carries the same policy. Without
+        // a policy (remote content allowed) there is nothing to report.
+        controller.addUserScript(WKUserScript(
+            source: HTMLBlockDocument.blockedContentScript,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: false,
+            in: .defaultClient
+        ))
+        contentController = controller
+        super.init(frame: .zero, configuration: configuration)
+        controller.add(HeightMessageHandler(self), contentWorld: .defaultClient, name: HeightMessageHandler.name)
+        controller.add(
+            BlockedContentMessageHandler(self),
+            contentWorld: .defaultClient,
+            name: BlockedContentMessageHandler.name
+        )
         navigationDelegate = navigation
         allowsMagnification = false
         allowsBackForwardNavigationGestures = false
@@ -263,16 +373,48 @@ final class HTMLBlockWebView: WKWebView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
 
-    func load(_ block: HTMLBlockContent, page: HTMLBlockPageOptions) {
+    /// Starts a use: shows `block` with `lease`'s resources and switches.
+    func begin(_ lease: HTMLBlockLease, showing block: HTMLBlockContent) {
+        self.lease = lease
+        contentController.removeAllContentRuleLists()
+        guard !lease.allowsRemoteContent else {
+            show(block)
+            return
+        }
+        // The policy in the page doesn't govern everything (`preconnect`
+        // opens a connection regardless), so a content rule list blocks every
+        // web request as well. It compiles once, asynchronously; the page
+        // waits for it, unless the view has moved on to another use.
         self.block = block
-        self.page = page
+        RemoteContentRuleList.whenReady { [weak self] ruleList in
+            guard let self, self.lease === lease else { return }
+            if let ruleList { self.contentController.add(ruleList) }
+            self.show(block)
+        }
+    }
+
+    /// Ends a use: the block's page goes, and with it its loads and scripts.
+    func end() {
+        lease = nil
+        block = nil
+        removeFromSuperview()
+        stopLoading()
+        contentController.removeAllContentRuleLists()
+        loadHTMLString("", baseURL: nil)
+    }
+
+    /// Loads `block` into the page, with the current lease's options.
+    func show(_ block: HTMLBlockContent) {
+        guard let lease else { return }
+        self.block = block
+        let page = lease.pageOptions
         let html = HTMLBlockDocument.page(
             for: block,
             colors: HTMLBlockDocument.colorRules(for: block.theme, appearance: effectiveAppearance),
             stylesheet: page.stylesheet,
             allowsRemoteContent: page.allowsRemoteContent
         )
-        loadHTMLString(html, baseURL: ResourceSchemeHandler.pageBaseURL(for: page.baseURL))
+        loadHTMLString(html, baseURL: ResourceSchemeHandler.pageBaseURL(for: page.baseURL, host: lease.resourceHost))
     }
 
     /// The block fits its content, so there is nothing to scroll inside it.
@@ -286,12 +428,12 @@ final class HTMLBlockWebView: WKWebView {
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        guard let block else { return }
+        guard let block, lease != nil else { return }
         // The page is first loaded before the view joins the editor, with the
         // app's appearance. Until it has loaded there is no style to patch, so
         // load it again with the colors for this appearance.
         guard !isLoading else {
-            load(block, page: page)
+            show(block)
             return
         }
         let rules = HTMLBlockDocument.colorRules(for: block.theme, appearance: effectiveAppearance)
@@ -458,78 +600,79 @@ enum HTMLBlockDocument {
 
 // MARK: - Height reports
 
+/// Relays a page's height reports to the current lease. Holds its view weakly:
+/// the view's content controller holds the handler.
 final class HeightMessageHandler: NSObject, WKScriptMessageHandler {
     static let name = "markdownEngineHeight"
-    private let heightDidChange: @MainActor (CGFloat) -> Void
+    private weak var webView: HTMLBlockWebView?
 
-    init(_ heightDidChange: @escaping @MainActor (CGFloat) -> Void) {
-        self.heightDidChange = heightDidChange
+    init(_ webView: HTMLBlockWebView) {
+        self.webView = webView
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard let number = message.body as? NSNumber else { return }
         let height = CGFloat(number.doubleValue)
-        MainActor.assumeIsolated { heightDidChange(height) }
+        MainActor.assumeIsolated { webView?.lease?.heightDidChange(height) }
     }
 }
 
-/// Relays the remote URLs a block's content policy blocked.
+/// Relays the remote URLs a block's content policy blocked to the current lease.
 final class BlockedContentMessageHandler: NSObject, WKScriptMessageHandler {
     static let name = "markdownEngineBlocked"
-    private let onBlocked: (@MainActor @Sendable (URL) -> Void)?
+    private weak var webView: HTMLBlockWebView?
 
-    init(_ onBlocked: (@MainActor @Sendable (URL) -> Void)?) {
-        self.onBlocked = onBlocked
+    init(_ webView: HTMLBlockWebView) {
+        self.webView = webView
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard let string = message.body as? String, let url = URL(string: string) else { return }
-        MainActor.assumeIsolated { onBlocked?(url) }
+        MainActor.assumeIsolated { webView?.lease?.onBlockedRemoteContent?(url) }
     }
 }
 
 // MARK: - Links
 
-/// Lets a block load once, then sends every link click to `openURL` instead
-/// of navigating the block. Embedded frames (a video player) load normally.
+/// Lets a block load once, then sends every link click to the lease's
+/// `openURL` instead of navigating the block. Embedded frames (a video
+/// player) load normally. Each navigation runs the page's own scripts only if
+/// the lease allows them.
 final class NavigationPolicy: NSObject, WKNavigationDelegate {
-    private let openURL: @MainActor @Sendable (URL) -> Void
-    private let documentBaseURL: URL?
-
-    init(openURL: @escaping @MainActor @Sendable (URL) -> Void, documentBaseURL: URL?) {
-        self.openURL = openURL
-        self.documentBaseURL = documentBaseURL
-    }
-
     func webView(
         _ webView: WKWebView,
         decidePolicyFor navigationAction: WKNavigationAction,
-        decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void
+        preferences: WKWebpagePreferences,
+        decisionHandler: @escaping @MainActor (WKNavigationActionPolicy, WKWebpagePreferences) -> Void
     ) {
+        let lease = (webView as? HTMLBlockWebView)?.lease
+        preferences.allowsContentJavaScript = lease?.allowsJavaScript ?? false
         // A link with no target frame opens a new window: treat it as the main frame's.
         let isMainFrame = navigationAction.targetFrame?.isMainFrame ?? true
         guard isMainFrame else {
-            decisionHandler(.allow)
+            decisionHandler(.allow, preferences)
             return
         }
         let url = navigationAction.request.url
         guard navigationAction.navigationType == .linkActivated else {
             // Only the block's own page loads in the main frame; a redirect,
-            // a meta refresh or a form never replaces it.
-            let isPageLoad = url.map { Self.isSamePage($0, as: Self.pageURL(for: documentBaseURL)) } ?? false
-            decisionHandler(isPageLoad ? .allow : .cancel)
+            // a meta refresh or a form never replaces it. An idle view only
+            // ever loads a blank page.
+            let page = Self.pageURL(for: lease?.baseURL, host: lease?.resourceHost ?? ResourceSchemeHandler.defaultHost)
+            let isPageLoad = url.map { Self.isSamePage($0, as: page) } ?? false
+            decisionHandler(isPageLoad ? .allow : .cancel, preferences)
             return
         }
-        decisionHandler(.cancel)
-        guard let url else { return }
+        decisionHandler(.cancel, preferences)
+        guard let url, let lease else { return }
         // A same-page anchor has nowhere to go in a block that fits its content.
         if url.fragment != nil, let current = webView.url, Self.isSamePage(url, as: current) { return }
-        openURL(ResourceSchemeHandler.fileURL(for: url) ?? url)
+        lease.openURL(ResourceSchemeHandler.fileURL(for: url) ?? url)
     }
 
     /// The URL a block's page loads at.
-    static func pageURL(for baseURL: URL?) -> URL {
-        ResourceSchemeHandler.pageBaseURL(for: baseURL) ?? URL(string: "about:blank")!
+    static func pageURL(for baseURL: URL?, host: String = ResourceSchemeHandler.defaultHost) -> URL {
+        ResourceSchemeHandler.pageBaseURL(for: baseURL, host: host) ?? URL(string: "about:blank")!
     }
 
     /// Whether `url` is `page`, ignoring any fragment.
@@ -544,30 +687,26 @@ final class NavigationPolicy: NSObject, WKNavigationDelegate {
 
 // MARK: - Resources
 
-/// Serves a block's relative file references through the embedder's loader.
+/// Serves a block's relative file references through the loader of the
+/// requesting view's current lease. One handler serves every pooled view.
 ///
-/// A block's page loads from `markdown-engine-resource://file/<folder>/`, so a
-/// relative reference resolves the way it would against the folder itself,
-/// `../` included; the handler turns the request back into a file URL.
+/// A block's page loads from `markdown-engine-resource://<host>/<folder>/`,
+/// so a relative reference resolves the way it would against the folder
+/// itself, `../` included; the handler turns the request back into a file URL.
+/// The host names the use (see `HTMLBlockLease.resourceHost`), not a file.
 final class ResourceSchemeHandler: NSObject, WKURLSchemeHandler, @unchecked Sendable {
     static let scheme = "markdown-engine-resource"
-    private static let host = "file"
+    static let defaultHost = "file"
+    static let shared = ResourceSchemeHandler()
 
-    private let load: WebKitHTMLBlockRenderer.ResourceLoader
-    /// Sent with every response, so a local page shown in a frame is held to
-    /// the same policy as the block's own page.
-    private let contentSecurityPolicy: String?
     /// Tasks WebKit hasn't stopped; a stopped task must not be answered.
     @MainActor private var activeTasks: Set<ObjectIdentifier> = []
 
-    init(load: @escaping WebKitHTMLBlockRenderer.ResourceLoader, contentSecurityPolicy: String? = nil) {
-        self.load = load
-        self.contentSecurityPolicy = contentSecurityPolicy
-    }
+    private override init() {}
 
     /// The URL a block's page loads from. A file base becomes a folder URL in
     /// this scheme; any other base is used as is.
-    static func pageBaseURL(for baseURL: URL?) -> URL? {
+    static func pageBaseURL(for baseURL: URL?, host: String = defaultHost) -> URL? {
         guard let baseURL else { return nil }
         guard baseURL.isFileURL else { return baseURL }
         var components = URLComponents()
@@ -580,7 +719,7 @@ final class ResourceSchemeHandler: NSObject, WKURLSchemeHandler, @unchecked Send
 
     /// The file a URL in this scheme stands for, or `nil` for any other URL.
     static func fileURL(for url: URL) -> URL? {
-        guard url.scheme == scheme, url.host == host else { return nil }
+        guard url.scheme == scheme, url.host?.isEmpty == false else { return nil }
         let file = URL(fileURLWithPath: url.path)
         guard let fragment = url.fragment,
               var components = URLComponents(url: file, resolvingAgainstBaseURL: false) else { return file }
@@ -594,7 +733,8 @@ final class ResourceSchemeHandler: NSObject, WKURLSchemeHandler, @unchecked Send
 
     @MainActor
     func webView(_ webView: WKWebView, start task: any WKURLSchemeTask) {
-        guard let requestURL = task.request.url, let file = Self.fileURL(for: requestURL) else {
+        guard let requestURL = task.request.url, let file = Self.fileURL(for: requestURL),
+              let lease = (webView as? HTMLBlockWebView)?.lease else {
             task.didFailWithError(URLError(.unsupportedURL))
             return
         }
@@ -602,12 +742,13 @@ final class ResourceSchemeHandler: NSObject, WKURLSchemeHandler, @unchecked Send
         // reused by another task until it is answered.
         let pending = PendingTask(task: task)
         activeTasks.insert(pending.id)
-        let load = self.load
+        let load = lease.resourceLoader
+        let policy = lease.contentSecurityPolicy
         DispatchQueue.global(qos: .userInitiated).async {
             let data = load(file)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    self.answer(pending, url: requestURL, file: file, data: data)
+                    self.answer(pending, url: requestURL, file: file, data: data, contentSecurityPolicy: policy)
                 }
             }
         }
@@ -619,7 +760,7 @@ final class ResourceSchemeHandler: NSObject, WKURLSchemeHandler, @unchecked Send
     }
 
     @MainActor
-    private func answer(_ pending: PendingTask, url: URL, file: URL, data: Data?) {
+    private func answer(_ pending: PendingTask, url: URL, file: URL, data: Data?, contentSecurityPolicy: String?) {
         guard activeTasks.remove(pending.id) != nil else { return }
         let task = pending.task
         guard let data else {

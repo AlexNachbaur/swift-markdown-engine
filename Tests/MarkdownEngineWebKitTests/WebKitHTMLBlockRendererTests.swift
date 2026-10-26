@@ -261,8 +261,10 @@ struct WebKitHTMLBlockLiveTests {
         let block = HTMLBlockContent(html: html, fontName: "Helvetica", fontSize: 14, theme: .default)
         let log = HeightLog()
         let view = renderer.makeView(for: block) { log.heights.append($0) }
-        let webView = try #require(view as? WKWebView)
+        let webView = try #require(view as? HTMLBlockWebView)
         view.frame = NSRect(x: 0, y: 0, width: 400, height: 40)
+        // Each use loads under its own host; the block's page is its folder there.
+        let page = try #require(webView.lease.map { NavigationPolicy.pageURL(for: folder, host: $0.resourceHost) })
 
         let deadline = Date().addingTimeInterval(15)
         while Date() < deadline, log.heights.isEmpty {
@@ -270,7 +272,7 @@ struct WebKitHTMLBlockLiveTests {
         }
         // Give the refresh time to fire, were it allowed.
         try await Task.sleep(nanoseconds: 300_000_000)
-        #expect(webView.url == NavigationPolicy.pageURL(for: folder))
+        #expect(webView.url == page)
 
         _ = try await webView.evaluateJavaScript("document.querySelector('a').click(); 0", in: nil, contentWorld: .defaultClient)
         while Date() < deadline, opened.urls.isEmpty {
@@ -278,7 +280,7 @@ struct WebKitHTMLBlockLiveTests {
         }
         #expect(opened.urls.map(\.path) == ["/Garden/notes/watering.md"])
         #expect(opened.urls.first?.isFileURL == true)
-        #expect(webView.url == NavigationPolicy.pageURL(for: folder))
+        #expect(webView.url == page)
     }
 
     @Test("With remote content off, remote loads are blocked and reported while local images load")
@@ -339,6 +341,45 @@ struct WebKitHTMLBlockLiveTests {
             #expect(listener.connections == 0)
             #expect(blocked.urls.map(\.absoluteString).contains("\(origin)/frame-image.png"))
         }
+    }
+
+    @Test("A reused view blocks or loads remote content as its new renderer says")
+    func reusedViewTakesTheNewRemoteSwitch() async throws {
+        let pool = HTMLBlockWebViewPool.shared
+        pool.purge()
+        let listener = try await LoopbackListener.start()
+        defer { listener.stop() }
+        let html = "<p><img src=\"http://127.0.0.1:\(listener.port)/pixel.png\" width=\"10\" height=\"10\"> moss</p>"
+
+        let blocking = WebKitHTMLBlockRenderer(allowsRemoteContent: false)
+        let block = HTMLBlockContent(html: html, fontName: "Helvetica", fontSize: 14, theme: .default)
+        let first = blocking.makeView(for: block) { _ in }
+        first.frame = NSRect(x: 0, y: 0, width: 300, height: 40)
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        #expect(listener.connections == 0)
+        blocking.releaseView(first)
+
+        let loading = WebKitHTMLBlockRenderer(allowsRemoteContent: true)
+        let second = loading.makeView(for: block) { _ in }
+        #expect(second === first)
+        let deadline = Date().addingTimeInterval(10)
+        while Date() < deadline, listener.connections == 0 {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        #expect(listener.connections > 0)
+        loading.releaseView(second)
+
+        // And back: blocked again on the next use.
+        let heard = listener.connections
+        let third = blocking.makeView(for: HTMLBlockContent(
+            html: html.replacingOccurrences(of: "pixel.png", with: "again.png"),
+            fontName: "Helvetica", fontSize: 14, theme: .default
+        )) { _ in }
+        #expect(third === first)
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        #expect(listener.connections == heard)
+        blocking.releaseView(third)
+        pool.purge()
     }
 
     @Test("Content sized by the viewport doesn't grow the block without end")
@@ -405,19 +446,25 @@ private final class LoopbackListener: @unchecked Sendable {
         parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: .any)
         let listener = try NWListener(using: parameters)
         let queue = DispatchQueue(label: "LoopbackListener")
+        /// Resumes the continuation once, whichever state comes first.
+        final class Once: @unchecked Sendable {
+            private let lock = NSLock()
+            private var done = false
+            func claim() -> Bool {
+                lock.lock(); defer { lock.unlock() }
+                guard !done else { return false }
+                done = true
+                return true
+            }
+        }
+        let once = Once()
         let port: UInt16 = try await withCheckedThrowingContinuation { continuation in
-            let resumed = NSLock()
-            var done = false
             listener.stateUpdateHandler = { state in
-                resumed.lock(); defer { resumed.unlock() }
-                guard !done else { return }
                 switch state {
                 case .ready:
-                    done = true
-                    continuation.resume(returning: listener.port?.rawValue ?? 0)
+                    if once.claim() { continuation.resume(returning: listener.port?.rawValue ?? 0) }
                 case .failed(let error):
-                    done = true
-                    continuation.resume(throwing: error)
+                    if once.claim() { continuation.resume(throwing: error) }
                 default:
                     break
                 }

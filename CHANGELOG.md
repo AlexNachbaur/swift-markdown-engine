@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - HTML blocks (CommonMark §4.6) render inline, sized to their content, through
   the new `HTMLBlockRenderer` service; the opt-in `MarkdownEngineWebKit` product
   ships `WebKitHTMLBlockRenderer`. Without a renderer HTML stays literal text.
+  Only blocks near the screen get a view; the rest are measured off screen,
+  and the WebKit renderer reuses views from one app-wide pool.
 - `NativeTextViewWrapper.isFocused` provides optional two-way first-responder
   coordination for embedders without changing AppKit-owned focus by default.
 - `CodeBlockButton(onHover:)` reports the pointer over the copy button, so an

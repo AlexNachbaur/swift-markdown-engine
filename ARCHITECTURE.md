@@ -273,8 +273,12 @@ Two sub-folders matter:
 
 - `NativeTextView/` — extensions on the AppKit subclass (paste, drag-select
   boost, spell policy, caret workarounds, frame/overscroll management, and
-  `+HTMLBlocks`, which hosts one renderer view per rendered HTML block over
-  the space the styler reserved, the way wide-table overlays are hosted)
+  `+HTMLBlocks`, which hosts a renderer view over the space the styler
+  reserved for each HTML block on or near the screen, the way wide-table
+  overlays are hosted; reconciles on scroll, gives views that leave back
+  through `releaseView`, measures blocks lacking a height for the current
+  column width with off-screen views, and keeps the first visible line in
+  place when a block above it changes height)
 - `Coordinator/` — `NSTextViewDelegate` glue, split by concern (restyling,
   writing-tools, find, code-blocks, inline selection, autocorrect)
 

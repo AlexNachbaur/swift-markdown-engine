@@ -89,13 +89,20 @@ final class NativeTextView: NSTextView {
     var tableHorizontalScrollOffsets: [Int: CGFloat] = [:]
 
     // MARK: HTML-block view state (`NativeTextView+HTMLBlocks.swift`)
-    /// One hosted renderer view per rendered HTML block, keyed by occurrence
-    /// and HTML; hidden rather than destroyed while the caret is inside.
+    /// A hosted renderer view per HTML block on or near the screen, keyed by
+    /// occurrence and HTML; hidden rather than released while the caret is inside.
     var htmlBlockViews: [String: HTMLBlockHostView] = [:]
+    /// Off-screen views measuring blocks that have no height for the current
+    /// column width, keyed by HTML.
+    var htmlBlockMeasurements: [String: HTMLBlockMeasurement] = [:]
     /// Bumped per reconcile; hidden views unseen for a while are dropped.
     var htmlBlockReconcileGeneration = 0
     /// HTML whose reported height changed since the last restyle of its block.
     var htmlBlocksAwaitingRestyle: Set<String> = []
+    /// The clip view whose scrolling reconciles the hosted views.
+    weak var htmlBlockObservedClipView: NSClipView?
+    /// Coalesces scroll-driven reconciles to one per run-loop turn.
+    var htmlBlockReconcileScheduled = false
 
     /// While Writing Tools slide the text below an edit into place: the rest of the
     /// edited paragraph; fragments from its end on are not drawn (`NativeTextView+WritingTools`).

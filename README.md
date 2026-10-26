@@ -218,6 +218,15 @@ document's body font and the theme's text and link colors. Putting the
 caret inside a block shows its source for editing. HTML comments render
 as nothing.
 
+Only blocks on or near the screen have a view. The rest keep the space
+their last measured height reserves; blocks with no height for the
+current column width are measured off screen ahead of scrolling, a couple
+at a time, and a block above the screen changing height doesn't move the
+text you're reading. Views that scroll away go back to the renderer
+(`releaseView(_:)`). `WebKitHTMLBlockRenderer` keeps them in one pool
+shared by every document and window, so a document with forty blocks uses
+a handful of web views, and scrolling through it makes no new ones.
+
 Relative references resolve against `baseURL` and are read through
 `resourceLoader`, so a sandboxed app decides what may be read. When that
 changes, for example after the user grants access to a folder, pass a new
