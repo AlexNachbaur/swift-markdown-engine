@@ -313,6 +313,25 @@ struct HTMLBlockViewportTests {
         #expect(seen == [260])
     }
 
+    @Test("After a renderer change, a remade live view holds its passing heights too")
+    func remadeViewHoldsAfterRendererChange() throws {
+        let editor = try makeEditor(renderer: LoadingRenderer(heights: [50, 260]))
+        drain(1.0)
+        #expect(editor.bridge.htmlBlockHeights[Self.top] == 260)
+
+        // What the wrapper does when the renderer's fingerprint changes.
+        editor.textView.removeAllHTMLBlockViews()
+        editor.bridge.htmlBlockMeasuredLayouts.removeAll()
+        editor.textView.updateHTMLBlockViews()
+        var seen: Set<CGFloat> = []
+        for _ in 0..<40 {
+            drain(0.02)
+            if let height = editor.bridge.htmlBlockHeights[Self.top] { seen.insert(height) }
+        }
+        #expect(liveHTML(editor).contains(Self.top))
+        #expect(seen == [260])
+    }
+
     @Test("A view whose block's source is being edited survives scrolling nearby")
     func hiddenViewSurvivesScrolling() throws {
         let renderer = PoolingRenderer(heights: [Self.top: 120, Self.bottom: 260])

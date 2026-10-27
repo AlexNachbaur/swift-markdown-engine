@@ -48,6 +48,8 @@ final class HTMLBlockHostView: NSView {
     var holdsReportsUntilSettled = false
     /// The latest report held back, applied once the view has settled.
     var heldHeight: CGFloat?
+    /// When the latest held report arrived.
+    var lastReportAt = Date.distantPast
     var settleTimer: Timer?
     /// When holding stops regardless, for a view that never says it settled.
     var holdDeadline = Date.distantFuture
@@ -290,7 +292,10 @@ extension NativeTextView {
                     generation: generation
                 )
                 host.frame = frame
-                if hasHTMLBlockHeight(anchor.html, for: layout) {
+                // Any known height, even one from another layout (a renderer
+                // change marks them all for measuring again), is better kept
+                // than the passing heights of a reloading page.
+                if bridge.htmlBlockHeights[anchor.html] != nil {
                     host.holdsReportsUntilSettled = true
                     host.holdDeadline = Date().addingTimeInterval(Self.htmlBlockMeasurementDeadline)
                 }
@@ -360,6 +365,7 @@ extension NativeTextView {
             return
         }
         host.heldHeight = reported
+        host.lastReportAt = Date()
         scheduleLiveSettleCheck(host)
     }
 
@@ -375,7 +381,12 @@ extension NativeTextView {
                     timer.invalidate()
                     return
                 }
-                guard self.configuration.services.htmlBlocks.hasSettled(view) || Date() >= host.holdDeadline else { return }
+                // Settled: finished loading, and quiet for a moment, so the
+                // last size report has arrived.
+                let now = Date()
+                let quiet = now.timeIntervalSince(host.lastReportAt) >= Self.htmlBlockMeasurementSettleDelay
+                let settled = quiet && self.configuration.services.htmlBlocks.hasSettled(view)
+                guard settled || now >= host.holdDeadline else { return }
                 timer.invalidate()
                 host.settleTimer = nil
                 host.holdsReportsUntilSettled = false
@@ -418,7 +429,9 @@ extension NativeTextView {
         for (_, host) in htmlBlockViews { releaseHTMLBlockHost(host, renderer: renderer) }
         htmlBlockViews.removeAll()
         cancelHTMLBlockMeasurements(keeping: [], renderer: renderer)
-        htmlBlocksAwaitingRestyle.removeAll()
+        // Restyles already queued stay queued: their heights are recorded,
+        // and the remade views won't report them again (unchanged heights
+        // are ignored), so dropping them would leave the old space reserved.
     }
 
     // MARK: Scrolling

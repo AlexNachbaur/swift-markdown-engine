@@ -354,15 +354,19 @@ struct HTMLBlockHostingTests {
                 != MarkdownEditorServices(htmlBlocks: Versioned(version: 2)).htmlBlockFingerprint)
     }
 
-    @Test("Removing all views clears pending height work")
-    func removeAllClearsState() throws {
+    @Test("A height reported just before every view is removed still reaches the text")
+    func removeAllKeepsQueuedRestyle() throws {
         let renderer = RecordingHTMLBlockRenderer()
         let editor = try makeEditor(Self.document, renderer: renderer)
+        let initialAfterY = afterParagraphY(editor)
         let report = try #require(renderer.heightCallbacks[Self.html])
         report(180)
+        // A renderer change lands in the same turn as the report.
         editor.textView.removeAllHTMLBlockViews()
         #expect(editor.textView.htmlBlockViews.isEmpty)
-        #expect(editor.textView.htmlBlocksAwaitingRestyle.isEmpty)
         drainMainRunLoop()
+        // The remade view would report 180 again, which is ignored as
+        // unchanged; the queued restyle must already have reserved it.
+        #expect(afterParagraphY(editor) - initialAfterY > 100)
     }
 }
