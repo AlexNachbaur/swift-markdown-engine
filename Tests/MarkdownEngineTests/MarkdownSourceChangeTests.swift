@@ -226,17 +226,15 @@ struct MarkdownSourceChangeTests {
         editor.textView.setSelectedRange(NSRange(location: 0, length: 5))
         editor.coordinator.didMarkdownBold(nil)
         editor.expectInStep()
-        // In a headless process AppKit's undo leaves out the change notification it
-        // sends in an app; the storage edits behind it are the real ones.
         while undo.canUndo {
             undo.undo()
-            editor.textView.didChangeText()
+            #expect(editor.source == editor.textView.string)
             editor.expectInStep("undo")
         }
         #expect(editor.source == "hello")
         while undo.canRedo {
             undo.redo()
-            editor.textView.didChangeText()
+            #expect(editor.source == editor.textView.string)
             editor.expectInStep("redo")
         }
         #expect(editor.source == "**hello**!")

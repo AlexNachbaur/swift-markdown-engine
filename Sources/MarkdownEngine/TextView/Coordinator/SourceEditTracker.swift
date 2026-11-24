@@ -24,6 +24,11 @@ final class SourceEditTracker {
 
     var hasUnreportedEdits: Bool { changed != nil }
 
+    /// Where the display text changed since the last report, as it is now.
+    var unreportedDisplayRange: NSRange? {
+        changed.map { NSRange(location: $0.start, length: $0.newLength) }
+    }
+
     /// Notes one round of `NSTextStorage` editing.
     func noteStorageEdit(editedRange: NSRange, changeInLength delta: Int) {
         let location = editedRange.location

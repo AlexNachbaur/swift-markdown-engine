@@ -79,6 +79,7 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     }
     let sourceEdits = SourceEditTracker()
     private var textStorageObserver: NSObjectProtocol?
+    private var undoObservers: [NSObjectProtocol] = []
     /// Owns the scroll-away header (build, content refresh, collapse/expand,
     /// teardown). Created on first reconcile with a non-nil header.
     var headerController: ScrollingHeaderController?
@@ -488,6 +489,12 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     private func observeTextStorage() {
         if let textStorageObserver { NotificationCenter.default.removeObserver(textStorageObserver) }
         textStorageObserver = nil
+        undoObservers.forEach(NotificationCenter.default.removeObserver(_:))
+        undoObservers = [Notification.Name.NSUndoManagerDidUndoChange, .NSUndoManagerDidRedoChange].map { name in
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: nil) { [weak self] notification in
+                self?.finishUndo(by: notification.object as? UndoManager)
+            }
+        }
         guard let storage = textView?.textStorage else { return }
         textStorageObserver = NotificationCenter.default.addObserver(
             forName: NSTextStorage.didProcessEditingNotification, object: storage, queue: nil
@@ -497,6 +504,22 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
             self?.sourceEdits.noteStorageEdit(
                 editedRange: storage.editedRange, changeInLength: storage.changeInLength)
         }
+    }
+
+    /// With TextKit 2, AppKit's undo and redo change the text without asking
+    /// `shouldChangeText` or calling `didChangeText` (measured on 26.6.2; TextKit 1
+    /// does both), so the binding and the styling would miss it.
+    private func finishUndo(by manager: UndoManager?) {
+        guard let manager, let textView, manager === textView.undoManager,
+              let range = sourceEdits.unreportedDisplayRange,
+              !textView.hasMarkedText(), !isWritingToolsActive, !isRebuildingDocument else { return }
+        pendingEditedRange = range
+        pendingTextMutation = nil
+        pendingEditCount = 0
+        pendingListStructureEdit = true
+        parseGeneration &+= 1
+        backtickCensusNeedsRescan = true
+        textView.didChangeText()
     }
 
     /// Reports what led from the last reported source text to `source`, if anything.
@@ -529,6 +552,7 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
         NotificationCenter.default.removeObserver(self)
         busObservers.forEach(NotificationCenter.default.removeObserver(_:))
         if let textStorageObserver { NotificationCenter.default.removeObserver(textStorageObserver) }
+        undoObservers.forEach(NotificationCenter.default.removeObserver(_:))
     }
 }
 
