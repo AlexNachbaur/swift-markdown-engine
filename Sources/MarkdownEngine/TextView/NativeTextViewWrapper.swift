@@ -96,9 +96,12 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
     /// batches are omitted so embedders can treat every callback as exact.
     public var onTextMutation: ((MarkdownTextMutation) -> Void)?
     /// Reports every change to the source text, once it is finished, so an embedder
-    /// can keep a mirror of it; see ``MarkdownSourceChange``. Called synchronously.
-    /// A `start` or `binding` change arrives inside a SwiftUI update, where neither
-    /// state nor the text may be changed; from an `editor` change both may.
+    /// can keep a mirror of it; see ``MarkdownSourceChange``. A first handler is told
+    /// of a `start`; one that takes another's place is not, and can read
+    /// ``MarkdownEditorHandle/sourceText``.
+    ///
+    /// Called synchronously, which can be inside a SwiftUI update, so change state
+    /// later. The text may be edited from an `editor` change, and from no other.
     public var onSourceChange: ((MarkdownSourceChange) -> Void)?
     /// Refers to the editor while it is mounted; see ``MarkdownEditorHandle``.
     public var handle: MarkdownEditorHandle?
@@ -456,8 +459,11 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         // to reach the CURRENT closures even when the pass below returns early.
         context.coordinator.onPersistScrollOffset = onPersistScrollOffset
         context.coordinator.restoreScrollOffset = restoreScrollOffset
+        let startsReporting = context.coordinator.onSourceChange == nil && onSourceChange != nil
         context.coordinator.onSourceChange = onSourceChange
-        context.coordinator.attach(handle)
+        if startsReporting { context.coordinator.reportSourceStart() }
+        // Only a new one: an editor about to be replaced must not take back the handle.
+        if context.coordinator.handle !== handle { context.coordinator.attach(handle) }
         context.coordinator.isFocused = isFocused
         textView.requestedFocus = isFocused?.wrappedValue
         textView.reconcileRequestedFocus()

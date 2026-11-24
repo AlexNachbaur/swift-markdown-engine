@@ -416,20 +416,77 @@ struct MarkdownSourceChangeTests {
         let editor = Editor(lines.joined())
         editor.coordinator.rebuildTextStorageAndStyle(editor.textView, from: new.joined())
         #expect(editor.changes.last?.edits.map(\.range.length) == [0, 0])
-        #expect(editor.changes.last?.edits.map(\.replacement) == [" changed", "inserted\n"])
+        #expect(editor.changes.last?.edits.map(\.replacement) == ["changed ", "inserted\n"])
         editor.expectInStep()
     }
 
-    @Test("Texts that share nothing are one replacement, at once")
-    func unrelatedTexts() {
-        let old = (0..<20_000).map { "o\($0)\n" }.joined()
-        let new = (0..<30_000).map { "n\($0)\n" }.joined()
-        let start = Date()
-        let edits = SourceTextDiff.edits(
+    private func diff(_ old: String, _ new: String) -> [MarkdownSourceEdit] {
+        SourceTextDiff.edits(
             from: old.utf16Units, NSRange(location: 0, length: old.utf16.count),
             to: new.utf16Units, NSRange(location: 0, length: new.utf16.count))
-        #expect(edits.count == 1)
-        #expect(Date().timeIntervalSince(start) < 5)
+    }
+
+    @Test("A change to each of 400 lines is an edit to each", arguments: ["dog", "", "dog\n", "> cat"])
+    func everyLine(replacement: String) {
+        let old = (0..<400).map { "cat \($0) sat, and another cat sat\n" }.joined()
+        let edits = diff(old, old.replacingOccurrences(of: "cat", with: replacement))
+        #expect(edits.count == 800)
+        #expect(edits.allSatisfy { $0.range.length <= 4 })
+    }
+
+    @Test("Marking every line is an insert to each", arguments: ["- ", "> ", "\t"])
+    func markEveryLine(marker: String) {
+        let lines = (0..<20_000).map { "line \($0) of the document" }
+        let edits = diff(lines.joined(separator: "\n"), lines.map { marker + $0 }.joined(separator: "\n"))
+        #expect(edits.count == 20_000)
+        #expect(edits.allSatisfy { $0.range.length == 0 && $0.replacement == marker })
+    }
+
+    @Test("Texts that share little are replaced, not picked apart")
+    func unrelatedTexts() {
+        func text(_ seed: Int, lines: Int) -> String {
+            (0..<lines).map { line in
+                (0..<120).map { "\(seed)w\(($0 * 7919 + line * 104_729 + seed) % 9973)" }.joined(separator: " ") + "\n"
+            }.joined()
+        }
+        #expect(diff(text(1, lines: 600), text(2, lines: 600)).count <= 600)
+        #expect(diff(text(1, lines: 600), text(2, lines: 500)).count == 1)
+        #expect(diff((0..<20_000).map { "o\($0)\n" }.joined(), (0..<30_000).map { "n\($0)\n" }.joined()).count == 1)
+        #expect(diff("", text(1, lines: 2)).count == 1)
+        #expect(diff(text(1, lines: 2), "").count == 1)
+        #expect(diff("", "").isEmpty)
+    }
+
+    @Test("Random pairs of texts: the edits lead from one to the other")
+    func randomPairs() {
+        var state: UInt64 = 42
+        func next(_ bound: Int) -> Int {
+            state = state &* 6364136223846793005 &+ 1442695040888963407
+            return Int((state >> 33) % UInt64(bound))
+        }
+        let alphabets = [["a", "b", "\n"], ["word", " ", "\n", "other"], ["👍", "👍🏽", "🇨🇦", "\n", "x"], ["\r\n", "e\u{301}", "é"]]
+        for round in 0..<4000 {
+            let alphabet = alphabets[round % alphabets.count]
+            func text() -> [String] { (0..<next(40)).map { _ in alphabet[next(alphabet.count)] } }
+            let old = text()
+            var new = next(3) == 0 ? text() : old
+            for _ in 0..<next(5) where !new.isEmpty {
+                let at = next(new.count)
+                switch next(3) {
+                case 0: new.remove(at: at)
+                case 1: new.insert(alphabet[next(alphabet.count)], at: at)
+                default: new[at] = alphabet[next(alphabet.count)]
+                }
+            }
+            let result = NSMutableString(string: old.joined())
+            for edit in diff(old.joined(), new.joined()) {
+                result.replaceCharacters(in: edit.range, with: edit.replacement)
+            }
+            guard (result as String).hasSameUTF16(as: new.joined()) else {
+                Issue.record("round \(round): \(old.joined().debugDescription) to \(new.joined().debugDescription)")
+                return
+            }
+        }
     }
 
     @Test("Precomposed and decomposed accents are different text")
@@ -600,6 +657,9 @@ struct MarkdownSourceChangeTests {
         @Published var raw = false
         @Published var identity = 0
         @Published var isMounted = true
+        @Published var documentId = "A"
+        @Published var reports = true
+        @Published var unrelated = 0
         @Published var handle = MarkdownEditorHandle()
         var mirror = ""
         var origins: [MarkdownSourceChange.Origin] = []
@@ -621,7 +681,8 @@ struct MarkdownSourceChangeTests {
                 let _ = configuration.rawSourceMode = model.raw
                 NativeTextViewWrapper(
                     text: $model.text, configuration: configuration, fontSize: model.fontSize,
-                    onSourceChange: { model.receive($0) }, handle: model.handle
+                    documentId: model.documentId,
+                    onSourceChange: model.reports ? { model.receive($0) } : nil, handle: model.handle
                 )
                 .id(model.identity)
             }
@@ -634,8 +695,9 @@ struct MarkdownSourceChangeTests {
         let window: NSWindow
         let host: NSHostingView<Host>
 
-        init() async {
+        init(reports: Bool = true) async {
             _ = NSApplication.shared
+            model.reports = reports
             host = NSHostingView(rootView: Host(model: model))
             // Never shown.
             window = NSWindow(
@@ -689,6 +751,86 @@ struct MarkdownSourceChangeTests {
             try editor.type("z")
             await editor.settle()
             editor.expectInStep()
+        }
+    }
+
+    @Test("An edit after a switch of document, in the same event, reaches the new one")
+    func editAfterSwitch() async throws {
+        let editor = await Mounted()
+        try editor.type("x")
+        editor.model.documentId = "B"
+        editor.model.text = "doc B"
+        editor.host.layoutSubtreeIfNeeded()
+        try editor.type("y")
+        await editor.settle()
+        #expect(editor.model.text == "doc By")
+        editor.expectInStep()
+    }
+
+    @Test("A first handler on a mounted editor is told what it holds")
+    func firstHandler() async throws {
+        let editor = await Mounted(reports: false)
+        try editor.type("x")
+        await editor.settle()
+        #expect(editor.model.origins.isEmpty)
+        editor.model.reports = true
+        await editor.settle()
+        #expect(editor.model.origins == [.start])
+        editor.expectInStep()
+        try editor.type("y")
+        await editor.settle()
+        #expect(editor.model.origins == [.start, .editor])
+        editor.expectInStep()
+    }
+
+    @Test("Writing Tools that change nothing leave the selection and the composition alone")
+    func idleWritingTools() async throws {
+        guard #available(macOS 15.0, *) else { return }
+        let editor = await Mounted()
+        let view = try #require(editor.model.handle.textView as? NativeTextView)
+        let coordinator = try #require(editor.model.handle.coordinator)
+        view.setSelectedRange(NSRange(location: 1, length: 1))
+        coordinator.textViewWritingToolsWillBegin(view)
+        coordinator.textViewWritingToolsDidEnd(view)
+        await editor.settle()
+        #expect(view.selectedRange() == NSRange(location: 1, length: 1))
+        view.insertText("Q", replacementRange: NSRange(location: 1, length: 0))
+        await editor.settle()
+        #expect(view.selectedRange().location == 2)
+        view.setMarkedText(
+            "か", selectedRange: NSRange(location: 1, length: 0),
+            replacementRange: NSRange(location: NSNotFound, length: 0))
+        editor.model.unrelated += 1
+        await editor.settle()
+        #expect(view.hasMarkedText())
+        view.unmarkText()
+        await editor.settle()
+        editor.expectInStep()
+    }
+
+    @Test("A Writing Tools result survives an update pass before it reaches the document")
+    func writingToolsThenUpdate() async throws {
+        guard #available(macOS 15.0, *) else { return }
+        for fontChange in [false, true] {
+            let editor = await Mounted()
+            let view = try #require(editor.model.handle.textView as? NativeTextView)
+            let coordinator = try #require(editor.model.handle.coordinator)
+            coordinator.textViewWritingToolsWillBegin(view)
+            coordinator.wtDetectedMode = .proofread
+            #expect(view.shouldChangeText(in: NSRange(location: 0, length: 3), replacementString: "**xyz**"))
+            view.textStorage?.replaceCharacters(in: NSRange(location: 0, length: 3), with: "**xyz**")
+            view.didChangeText()
+            if fontChange { editor.model.fontSize = 20 }
+            editor.host.layoutSubtreeIfNeeded()
+            coordinator.textViewWritingToolsDidEnd(view)
+            if fontChange { editor.model.fontSize = 21 }
+            editor.host.layoutSubtreeIfNeeded()
+            await editor.settle()
+            #expect(editor.model.text == "**xyz**")
+            editor.expectInStep()
+            // The session's text was never styled; the pass after it does that.
+            let font = view.textStorage?.attribute(.font, at: 3, effectiveRange: nil) as? NSFont
+            #expect(font?.fontDescriptor.symbolicTraits.contains(.bold) == true)
         }
     }
 

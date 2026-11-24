@@ -65,6 +65,9 @@ final class SourceEditTracker {
         changed = nil
     }
 
+    /// The next report starts over.
+    func forget() { source = nil }
+
     /// The edits from the last reported source text to `newSource`, which becomes
     /// the last reported one.
     func takeEdits(to newSource: String, metadata newMetadata: LinkMetadata) -> [MarkdownSourceEdit] {

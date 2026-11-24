@@ -49,15 +49,10 @@ extension NativeTextViewCoordinator {
         if postUndo != nil {
             rebuildTextStorageAndStyle(textView, from: storage, origin: .editor)
         }
-        // Don't pre-set `lastSyncedText` — leaving it stale lets updateNSView do its
-        // normal rebuild (restyle + re-measure) so the accepted WT result stays visible.
-        let target = documentId
-        DispatchQueue.main.async { [self] in
-            guard bindingFollows(target) else { return }
-            // The handler below may have edited the text since.
-            didInitialFormatting = false
-            text = lastComputedStorage
-        }
+        // Otherwise updateNSView rebuilds (restyle + re-measure) once the binding has
+        // the result, so the accepted WT result stays visible.
+        needsRebuildAfterWrite = postUndo == nil && !lastComputedStorage.hasSameUTF16(as: lastSyncedText)
+        queueBindingWrite()
         reportSourceChange(origin: .editor)
     }
 

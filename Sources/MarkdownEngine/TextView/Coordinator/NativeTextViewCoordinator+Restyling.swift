@@ -55,6 +55,7 @@ extension NativeTextViewCoordinator {
         }
         lastSyncedText = text
         lastComputedStorage = text
+        needsRebuildAfterWrite = false
         previousDisplayLength = (displayText as NSString).length
         let nsDisplay = displayText as NSString
         // Fresh document baseline: drop the incremental parse state and reseed
@@ -207,6 +208,8 @@ extension NativeTextViewCoordinator {
             nativeTextView.updateWideTableOverlays()
             nativeTextView.updateHTMLBlockViews()
         }
+        // The rebuild is done, and a handler may edit.
+        isRebuildingDocument = false
         reportSourceChange(origin: origin)
     }
 

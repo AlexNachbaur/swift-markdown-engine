@@ -26,12 +26,13 @@ public struct MarkdownSourceEdit: Equatable, Sendable {
 /// one native edit, the changes form a complete record. A mirror that is emptied
 /// by each ``Origin/start`` and applies every change's edits always equals
 /// ``MarkdownEditorHandle/sourceText``. An input-method composition and a Writing
-/// Tools session each arrive as one change when they finish.
+/// Tools session each arrive as one change when they finish. (In raw source mode
+/// the binding follows a Writing Tools session step by step; this doesn't.)
 public struct MarkdownSourceChange: Equatable, Sendable {
     /// What made a change.
     public enum Origin: Equatable, Sendable {
-        /// The editor began with a text: it was mounted (again), or switched to
-        /// another `documentId`. The edits insert the whole text into an empty one.
+        /// The editor began with a text: it was mounted (again), switched to another
+        /// `documentId`, or had no handler until now. The edits insert the whole text into an empty one.
         ///
         /// An editor that replaces another can start from a `text` the old one's
         /// last edit hasn't reached yet; that edit then follows as a `binding` change.

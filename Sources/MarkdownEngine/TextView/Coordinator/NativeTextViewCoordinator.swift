@@ -84,6 +84,8 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     var viewportObservers: [NSObjectProtocol] = []
     private(set) weak var handle: MarkdownEditorHandle?
     private var isBindingWriteQueued = false
+    /// The text was changed without being styled, by a Writing Tools session.
+    var needsRebuildAfterWrite = false
     /// Whether the editor holds edits the binding doesn't have yet.
     var hasUnsyncedEdits: Bool { isBindingWriteQueued && !lastComputedStorage.hasSameUTF16(as: lastSyncedText) }
     /// Owns the scroll-away header (build, content refresh, collapse/expand,
@@ -540,9 +542,15 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
         let target = documentId
         DispatchQueue.main.async {
             self.isBindingWriteQueued = false
-            guard self.bindingFollows(target),
-                  !self.lastComputedStorage.hasSameUTF16(as: self.lastSyncedText) else { return }
-            self.lastSyncedText = self.lastComputedStorage
+            guard self.bindingFollows(target) else {
+                // Another document's edits found this write in their way.
+                if target != self.documentId { self.queueBindingWrite() }
+                return
+            }
+            guard !self.lastComputedStorage.hasSameUTF16(as: self.lastSyncedText) else { return }
+            // Left stale, it makes the next update pass rebuild.
+            if !self.needsRebuildAfterWrite { self.lastSyncedText = self.lastComputedStorage }
+            self.needsRebuildAfterWrite = false
             self.text = self.lastComputedStorage
         }
     }
@@ -567,6 +575,13 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
         if isStart || !edits.isEmpty {
             onSourceChange(MarkdownSourceChange(edits: edits, origin: isStart ? .start : origin))
         }
+    }
+
+    /// Reports the text a mounted editor already has, to a first handler.
+    func reportSourceStart() {
+        guard sourceEdits.source != nil else { return }
+        sourceEdits.forget()
+        reportSourceChange(origin: .start)
     }
 
     @MainActor
