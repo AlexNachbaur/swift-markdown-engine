@@ -7,13 +7,14 @@ import AppKit
 
 /// An embedder's reference to a mounted editor.
 ///
-/// Create one, keep it as long as the host view, and pass it to
+/// Create one, keep it as long as the host view, and pass it to one
 /// ``NativeTextViewWrapper``. It refers to the editor only while that is mounted,
 /// and to the new one after a remount.
 @MainActor
 public final class MarkdownEditorHandle {
-    weak var coordinator: NativeTextViewCoordinator?
+    private(set) weak var coordinator: NativeTextViewCoordinator?
 
+    /// A handle that refers to no editor yet.
     public init() {}
 
     /// The editor's text view, or `nil` while no editor is mounted.
@@ -44,5 +45,16 @@ public final class MarkdownEditorHandle {
               range.location != NSNotFound, range.location >= 0, range.length >= 0,
               range.length <= length, range.location <= length - range.length else { return nil }
         return map.displayRange(forSourceRange: range)
+    }
+
+    func attach(to coordinator: NativeTextViewCoordinator) {
+        guard self.coordinator !== coordinator else { return }
+        self.coordinator = coordinator
+    }
+
+    /// Only if it still refers to `coordinator`: a remount can attach the new
+    /// editor before the old one is dismantled.
+    func detach(from coordinator: NativeTextViewCoordinator) {
+        if self.coordinator === coordinator { self.coordinator = nil }
     }
 }

@@ -95,10 +95,10 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
     /// Multi-step smart-input transformations and ambiguous composition
     /// batches are omitted so embedders can treat every callback as exact.
     public var onTextMutation: ((MarkdownTextMutation) -> Void)?
-    /// Reports every change to the source text, once it is finished. Nothing is
-    /// left out, so an embedder can keep a mirror of the text; see
-    /// ``MarkdownSourceChange``. Not called for the text an editor is mounted with
-    /// or a switch to another `documentId`.
+    /// Reports every change to the source text, once it is finished, so an embedder
+    /// can keep a mirror of it; see ``MarkdownSourceChange``. Called synchronously.
+    /// A `start` or `binding` change arrives inside a SwiftUI update, where neither
+    /// state nor the text may be changed; from an `editor` change both may.
     public var onSourceChange: ((MarkdownSourceChange) -> Void)?
     /// Refers to the editor while it is mounted; see ``MarkdownEditorHandle``.
     public var handle: MarkdownEditorHandle?
@@ -363,7 +363,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         context.coordinator.wikiLinkMetadata = initialState.metadata
         context.coordinator.onCaretRectChange = onCaretRectChange
         context.coordinator.onTextMutation = onTextMutation
-        handle?.coordinator = context.coordinator
+        context.coordinator.attach(handle)
         context.coordinator.onBuildContextMenu = onBuildContextMenu
         context.coordinator.onInlineSelectionChange = onInlineSelectionChange
         context.coordinator.onInlinePreviewKey = onInlinePreviewKey
@@ -383,7 +383,12 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         }
         scrollView.contentView.postsBoundsChangedNotifications = true
         var lastObservedViewportWidth = scrollView.contentView.bounds.width
-        NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: scrollView.contentView, queue: nil) { _ in
+        // Weakly: an observer the notification center keeps would keep the editor.
+        let coordinator = context.coordinator
+        coordinator.viewportObservers.append(NotificationCenter.default.addObserver(
+            forName: NSView.frameDidChangeNotification, object: scrollView.contentView, queue: nil
+        ) { [weak scrollView, weak textView, weak coordinator] _ in
+            guard let scrollView, let textView, let coordinator else { return }
             // Refresh code-block overlays only on real viewport width changes, not on TextKit height-only echoes during typing.
             let newWidth = scrollView.contentView.bounds.width
             if abs(newWidth - lastObservedViewportWidth) > 0.5 {
@@ -395,8 +400,8 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
                 if textView.configuration.readingWidth != nil {
                     textView.centerReadingColumn(forClipWidth: newWidth)
                 }
-                context.coordinator.didEnsureLayoutForCurrentDocument = false
-                context.coordinator.updateCodeBlockSelection(textView: textView)
+                coordinator.didEnsureLayoutForCurrentDocument = false
+                coordinator.updateCodeBlockSelection(textView: textView)
             }
             // Only react with overscroll recalc when the viewport itself resizes
             // (window resize). Without this guard, TextKit-induced frame changes echo
@@ -420,17 +425,22 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             guard abs(container.frame.height - scrollView.contentView.bounds.height) > 1 else { return }
             textView.recalcOverscroll(for: scrollView)
             scrollView.clampToInsets()
-        }
-        NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: scrollView.contentView, queue: nil) { _ in
+        })
+        coordinator.viewportObservers.append(NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification, object: scrollView.contentView, queue: nil
+        ) { [weak scrollView, weak textView, weak coordinator] _ in
+            guard let scrollView, let textView, let coordinator else { return }
             textView.ensureVisibleLayout()
-            if context.coordinator.isWritingToolsActive {
-                context.coordinator.fixWritingToolsChildWindowIfNeeded(textView: textView)
+            if coordinator.isWritingToolsActive {
+                coordinator.fixWritingToolsChildWindowIfNeeded(textView: textView)
             }
             scrollView.clampToInsets()
-            context.coordinator.refreshActiveLinkCaretRect()
-            context.coordinator.updateCodeBlockSelection(textView: textView)
-        }
+            coordinator.refreshActiveLinkCaretRect()
+            coordinator.updateCodeBlockSelection(textView: textView)
+        })
         reconcileHeader(textView: textView, context: context)
+        coordinator.lastComputedStorage = text
+        coordinator.reportSourceChange(origin: .binding)
         return scrollView
     }
 
@@ -447,7 +457,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         context.coordinator.onPersistScrollOffset = onPersistScrollOffset
         context.coordinator.restoreScrollOffset = restoreScrollOffset
         context.coordinator.onSourceChange = onSourceChange
-        handle?.coordinator = context.coordinator
+        context.coordinator.attach(handle)
         context.coordinator.isFocused = isFocused
         textView.requestedFocus = isFocused?.wrappedValue
         textView.reconcileRequestedFocus()
@@ -747,11 +757,17 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         // reads the current values from the View struct.
         context.coordinator.fontName = fontName
         context.coordinator.fontSize = fontSize
-        context.coordinator.rebuildTextStorageAndStyle(
+        // A rebuild for another reason (font, raw source) keeps edits the binding
+        // doesn't have yet; they are still on their way to it.
+        let coordinator = context.coordinator
+        let unsynced = !isNodeSwitch && coordinator.hasUnsyncedEdits && coordinator.lastSyncedText.hasSameUTF16(as: text)
+            ? coordinator.lastComputedStorage : nil
+        coordinator.rebuildTextStorageAndStyle(
             textView,
-            from: text,
+            from: unsynced ?? text,
             invalidateLayout: isNodeSwitch || rawSourceModeChanged
         )
+        if unsynced != nil { coordinator.lastSyncedText = text }
         textView.recalcOverscroll(for: nsView)
         (nsView as? ClampedScrollView)?.clampToInsets()
         // Height is measured now, so restore the saved offset; clampToInsets keeps
@@ -847,6 +863,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
     /// different screen — and that is the only moment left to record where the
     /// reader was; the coordinator's own offsets die with it.
     public static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
+        coordinator.attach(nil)
         // A restore still pending means the reader was never put back where they
         // were — recording the current offset would overwrite the good one with
         // the mid-load position.

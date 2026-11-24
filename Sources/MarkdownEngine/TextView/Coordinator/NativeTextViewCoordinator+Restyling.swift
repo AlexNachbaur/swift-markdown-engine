@@ -17,7 +17,8 @@ extension NativeTextViewCoordinator {
     func rebuildTextStorageAndStyle(
         _ textView: NSTextView,
         from text: String,
-        invalidateLayout: Bool = false
+        invalidateLayout: Bool = false,
+        origin: MarkdownSourceChange.Origin = .binding
     ) {
         // Suppress the re-entrant textViewDidChangeSelection that `textView.string =`
         // and the setAttributedString transfer below fire synchronously (71ms of
@@ -206,7 +207,7 @@ extension NativeTextViewCoordinator {
             nativeTextView.updateWideTableOverlays()
             nativeTextView.updateHTMLBlockViews()
         }
-        reportSourceChange(to: text, origin: .binding)
+        reportSourceChange(origin: origin)
     }
 
     @discardableResult

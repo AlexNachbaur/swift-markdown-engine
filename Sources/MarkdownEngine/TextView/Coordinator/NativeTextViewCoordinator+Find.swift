@@ -118,8 +118,9 @@ extension NativeTextViewCoordinator {
         let matches = findMatches(of: query, in: tv.string as NSString)
         guard !matches.isEmpty else { postFindResults(count: 0); return }
 
-        // Group as one undo; edit back-to-front so earlier ranges stay valid.
-        let orderedRanges = matches.reversed().map { NSValue(range: $0) }
+        // Group as one undo. AppKit wants the ranges in order, and throws on a
+        // shorter replacement otherwise.
+        let orderedRanges = matches.map { NSValue(range: $0) }
         let replacements = Array(repeating: replacement, count: matches.count)
 
         tv.breakUndoCoalescing()
@@ -127,6 +128,7 @@ extension NativeTextViewCoordinator {
         defer { isProgrammaticEdit = false }
         guard tv.shouldChangeText(inRanges: orderedRanges, replacementStrings: replacements) else { return }
         tv.textStorage?.beginEditing()
+        // Back to front, so earlier ranges stay valid.
         for match in matches.reversed() {
             tv.textStorage?.replaceCharacters(in: match, with: replacement)
         }

@@ -80,6 +80,12 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     let sourceEdits = SourceEditTracker()
     private var textStorageObserver: NSObjectProtocol?
     private var undoObservers: [NSObjectProtocol] = []
+    /// The scroll view's bounds and frame observers, removed with the editor.
+    var viewportObservers: [NSObjectProtocol] = []
+    private(set) weak var handle: MarkdownEditorHandle?
+    private var isBindingWriteQueued = false
+    /// Whether the editor holds edits the binding doesn't have yet.
+    var hasUnsyncedEdits: Bool { isBindingWriteQueued && !lastComputedStorage.hasSameUTF16(as: lastSyncedText) }
     /// Owns the scroll-away header (build, content refresh, collapse/expand,
     /// teardown). Created on first reconcile with a non-nil header.
     var headerController: ScrollingHeaderController?
@@ -511,26 +517,63 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     /// does both), so the binding and the styling would miss it.
     private func finishUndo(by manager: UndoManager?) {
         guard let manager, let textView, manager === textView.undoManager,
-              let range = sourceEdits.unreportedDisplayRange,
+              let edit = sourceEdits.unreportedDisplayEdit,
               !textView.hasMarkedText(), !isWritingToolsActive, !isRebuildingDocument else { return }
-        pendingEditedRange = range
+        pendingEditedRange = edit.range
         pendingTextMutation = nil
+        // Not one tracked edit, so the fast paths that trust one stay off, and what
+        // the text was before the undo is gone: restyle as if it held the most.
         pendingEditCount = 0
         pendingListStructureEdit = true
+        pendingExtFenceTouched = !cachedExtensionRegistry.blockEntries.isEmpty
         parseGeneration &+= 1
         backtickCensusNeedsRescan = true
         textView.didChangeText()
     }
 
-    /// Reports what led from the last reported source text to `source`, if anything.
-    func reportSourceChange(to source: String, origin: MarkdownSourceChange.Origin) {
+    /// Writes the source text to the binding after the current event. The text is
+    /// read when the write happens, so edits made until then are in it, and a text
+    /// the binding handed over in the meantime isn't overwritten with an older one.
+    func queueBindingWrite() {
+        guard !isBindingWriteQueued, !lastComputedStorage.hasSameUTF16(as: lastSyncedText) else { return }
+        isBindingWriteQueued = true
+        let target = documentId
+        DispatchQueue.main.async {
+            self.isBindingWriteQueued = false
+            guard self.bindingFollows(target),
+                  !self.lastComputedStorage.hasSameUTF16(as: self.lastSyncedText) else { return }
+            self.lastSyncedText = self.lastComputedStorage
+            self.text = self.lastComputedStorage
+        }
+    }
+
+    /// Reports what led from the last reported source text to ``lastComputedStorage``,
+    /// if anything.
+    func reportSourceChange(origin: MarkdownSourceChange.Origin) {
         let metadata = configuration.rawSourceMode ? [:] : wikiLinkMetadata
-        guard let onSourceChange else {
-            sourceEdits.reset(source: source, metadata: metadata, documentId: documentId)
+        guard bindingFollows(documentId) else {
+            // What the binding won't get isn't reported either.
+            sourceEdits.reset(
+                source: lastComputedStorage, metadata: metadata, documentId: sourceEdits.documentId)
             return
         }
-        let edits = sourceEdits.takeEdits(to: source, metadata: metadata, documentId: documentId)
-        if !edits.isEmpty { onSourceChange(MarkdownSourceChange(edits: edits, origin: origin)) }
+        let isStart = sourceEdits.source == nil || sourceEdits.documentId != documentId
+        guard let onSourceChange else {
+            sourceEdits.reset(source: lastComputedStorage, metadata: metadata, documentId: documentId)
+            return
+        }
+        if isStart { sourceEdits.reset(source: "", metadata: [:], documentId: documentId) }
+        let edits = sourceEdits.takeEdits(to: lastComputedStorage, metadata: metadata)
+        if isStart || !edits.isEmpty {
+            onSourceChange(MarkdownSourceChange(edits: edits, origin: isStart ? .start : origin))
+        }
+    }
+
+    @MainActor
+    func attach(_ handle: MarkdownEditorHandle?) {
+        if self.handle !== handle { self.handle?.detach(from: self) }
+        self.handle = handle
+        handle?.attach(to: self)
     }
 
     /// The map between display and source offsets, unless an edit is still unfinished.
@@ -553,6 +596,7 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
         busObservers.forEach(NotificationCenter.default.removeObserver(_:))
         if let textStorageObserver { NotificationCenter.default.removeObserver(textStorageObserver) }
         undoObservers.forEach(NotificationCenter.default.removeObserver(_:))
+        viewportObservers.forEach(NotificationCenter.default.removeObserver(_:))
     }
 }
 

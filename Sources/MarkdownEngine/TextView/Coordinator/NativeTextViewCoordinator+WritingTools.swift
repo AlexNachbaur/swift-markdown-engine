@@ -42,19 +42,23 @@ extension NativeTextViewCoordinator {
         )
         wikiLinkMetadata = storageState.metadata
         let storage = storageState.storage
-        reportSourceChange(to: storage, origin: .editor)
+        lastComputedStorage = storage
+        previousDisplayLength = (sourceText as NSString).length
 
         // Binding is already equal to `storage` after undo so SwiftUI won't re-render — rebuild the textView directly.
         if postUndo != nil {
-            rebuildTextStorageAndStyle(textView, from: storage)
+            rebuildTextStorageAndStyle(textView, from: storage, origin: .editor)
         }
         // Don't pre-set `lastSyncedText` — leaving it stale lets updateNSView do its
         // normal rebuild (restyle + re-measure) so the accepted WT result stays visible.
         let target = documentId
         DispatchQueue.main.async { [self] in
             guard bindingFollows(target) else { return }
-            text = storage
+            // The handler below may have edited the text since.
+            didInitialFormatting = false
+            text = lastComputedStorage
         }
+        reportSourceChange(origin: .editor)
     }
 
     /// Writing Tools rewrite prose only: code, formulas, links, embeds and tables come

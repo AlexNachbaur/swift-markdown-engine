@@ -3,7 +3,8 @@
 //  MarkdownEngine
 //
 //  Offsets between the display text and the source (storage) text. They agree
-//  everywhere except inside and after links whose `|<id>` the display hides.
+//  everywhere except inside and after links whose `|<id>` the display hides, or
+//  whose name it shows as the target's current one.
 //
 
 import Foundation
@@ -12,8 +13,9 @@ struct WikiLinkOffsetMap {
     private struct Link {
         let display: NSRange
         let source: NSRange
-        /// Length of `[[Name` / `![[Name` when both forms spell it the same, else nil.
-        let sharedPrefix: Int?
+        /// Lengths of `[[Name` or `![[Name`, which the two forms can spell differently.
+        let displayPrefix: Int
+        let sourcePrefix: Int
     }
 
     private let links: [Link]
@@ -21,11 +23,11 @@ struct WikiLinkOffsetMap {
     init(_ metadata: [WikiLinkService.RangeKey: WikiLinkService.LinkMetadata]) {
         links = metadata.map { key, value in
             let hidden = value.id.map { $0.isEmpty ? 0 : $0.utf16.count + 1 } ?? 0
-            let sameName = key.length + hidden == value.storageRange.length
             return Link(
                 display: NSRange(location: key.location, length: key.length),
                 source: value.storageRange,
-                sharedPrefix: sameName ? key.length - 2 : nil
+                displayPrefix: key.length - 2,
+                sourcePrefix: value.storageRange.length - 2 - hidden
             )
         }
         .sorted { $0.display.location < $1.display.location }
@@ -51,16 +53,19 @@ struct WikiLinkOffsetMap {
         let fromEnd = NSMaxRange(link.display) - offset
         // After the link (zero or less), or between its closing brackets.
         if fromEnd < 2 { return NSMaxRange(link.source) - fromEnd }
-        guard link.sharedPrefix != nil else { return link.source.location }
-        return link.source.location + (offset - link.display.location)
+        let inLink = offset - link.display.location
+        // The end of the name is the end of the name, however long it is.
+        return link.source.location
+            + (inLink >= link.displayPrefix ? link.sourcePrefix : min(inLink, link.sourcePrefix))
     }
 
     func displayOffset(forSourceOffset offset: Int) -> Int {
         guard let link = lastLink(where: { $0.source.location < offset }) else { return offset }
         let fromEnd = NSMaxRange(link.source) - offset
         if fromEnd < 2 { return NSMaxRange(link.display) - fromEnd }
-        guard let prefix = link.sharedPrefix else { return link.display.location }
-        return link.display.location + min(offset - link.source.location, prefix)
+        let inLink = offset - link.source.location
+        return link.display.location
+            + (inLink >= link.sourcePrefix ? link.displayPrefix : min(inLink, link.displayPrefix))
     }
 
     private func lastLink(where precedes: (Link) -> Bool) -> Link? {

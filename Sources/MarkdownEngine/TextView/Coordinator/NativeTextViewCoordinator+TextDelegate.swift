@@ -90,24 +90,17 @@ extension NativeTextViewCoordinator {
             pendingEditCount = 0
             pendingEditedRange = nil
             guard !tv.hasMarkedText() else { return }
-            if !tv.string.hasSameUTF16(as: lastSyncedText) {
-                let rawText = tv.string
-                let target = documentId
-                DispatchQueue.main.async {
-                    guard self.bindingFollows(target) else { return }
-                    self.lastSyncedText = rawText
-                    self.text = rawText
-                }
-            }
+            lastComputedStorage = tv.string
+            queueBindingWrite()
             if let bottomTextView = tv as? NativeTextView,
                let scrollView = tv.enclosingScrollView {
                 bottomTextView.recalcOverscroll(for: scrollView, debugTag: "textDidChange")
                 (scrollView as? ClampedScrollView)?.clampToInsets()
             }
-            if bindingFollows(documentId) {
-                if let completedTextMutation { onTextMutation?(completedTextMutation) }
-                reportSourceChange(to: tv.string, origin: .editor)
+            if let completedTextMutation, bindingFollows(documentId) {
+                onTextMutation?(completedTextMutation)
             }
+            reportEditorChange()
             return
         }
         let wtActive = isWritingToolsActive
@@ -168,11 +161,14 @@ extension NativeTextViewCoordinator {
         }
 
         if !wtActive {
+            // What the storage saw change since `lastComputedStorage`, which the
+            // proposed edit can't say when several were made.
+            let storageEdit = sourceEdits.unreportedDisplayEdit.flatMap { $0.delta == lengthDelta ? $0 : nil }
             let storageState = PerfTrace.measure("wiki") {
                 WikiLinkService.updatedStorageState(
                     displayText: docString,
-                    editedRange: editedRange,
-                    changeInLength: lengthDelta,
+                    editedRange: storageEdit?.range ?? editedRange,
+                    changeInLength: storageEdit?.delta ?? lengthDelta,
                     previousStorage: lastComputedStorage,
                     previousMetadata: wikiLinkMetadata
                 ) ?? WikiLinkService.makeStorageState(
@@ -198,14 +194,7 @@ extension NativeTextViewCoordinator {
                        "wiki incremental splice diverged from full rebuild")
             }
 #endif
-            if !storageState.storage.hasSameUTF16(as: self.lastSyncedText) {
-                let target = documentId
-                DispatchQueue.main.async {
-                    guard self.bindingFollows(target) else { return }
-                    self.lastSyncedText = storageState.storage
-                    self.text = storageState.storage
-                }
-            }
+            queueBindingWrite()
         }
 
         let paragraphRange = fullText.paragraphRange(for: safeSelRange)
@@ -378,11 +367,17 @@ extension NativeTextViewCoordinator {
             }
         }
         previousActiveTokenIndices = activeTokenIndices
-        if bindingFollows(documentId) {
-            if let completedTextMutation { onTextMutation?(completedTextMutation) }
-            PerfTrace.measure("sourceEdits") { reportSourceChange(to: lastComputedStorage, origin: .editor) }
+        if let completedTextMutation, bindingFollows(documentId) {
+            onTextMutation?(completedTextMutation)
         }
+        PerfTrace.measure("sourceEdits") { reportEditorChange() }
         PerfTrace.end()
+    }
+
+    /// Last in a text change: the handler may edit the text.
+    private func reportEditorChange() {
+        // A Writing Tools session is one change, when it ends.
+        if !isWritingToolsActive { reportSourceChange(origin: .editor) }
     }
 
     public func textViewDidChangeSelection(_ notification: Notification) {

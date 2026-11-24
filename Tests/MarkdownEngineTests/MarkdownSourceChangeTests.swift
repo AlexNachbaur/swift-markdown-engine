@@ -20,16 +20,27 @@ struct MarkdownSourceChangeTests {
         let textView = NativeTextView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
         let handle = MarkdownEditorHandle()
         let coordinator: NativeTextViewCoordinator
-        var mirror: String
+        let document: Document
+        var mirror = ""
+        /// Since the editor started.
         var changes: [MarkdownSourceChange] = []
+        var onChange: ((MarkdownSourceChange) -> Void)?
+
+        @MainActor
+        final class Document {
+            var text: String
+            init(_ text: String) { self.text = text }
+        }
 
         init(_ text: String, raw: Bool = false, configuration: MarkdownEditorConfiguration = .default) {
             _ = NSApplication.shared
             var configuration = configuration
             configuration.rawSourceMode = raw
-            mirror = text
+            let document = Document(text)
+            self.document = document
             coordinator = NativeTextViewWrapper(
-                text: .constant(text), configuration: configuration, documentId: "A"
+                text: Binding(get: { document.text }, set: { document.text = $0 }),
+                configuration: configuration, documentId: "A"
             ).makeCoordinator()
             textView.configuration = configuration
             textView.isEditable = true
@@ -37,12 +48,22 @@ struct MarkdownSourceChangeTests {
             textView.delegate = coordinator
             coordinator.textView = textView
             coordinator.onSourceChange = { [weak self] in self?.receive($0) }
-            handle.coordinator = coordinator
+            coordinator.attach(handle)
             coordinator.rebuildTextStorageAndStyle(textView, from: text)
         }
 
         private func receive(_ change: MarkdownSourceChange) {
-            changes.append(change)
+            if change.origin == .start {
+                mirror = ""
+                changes = []
+            } else {
+                changes.append(change)
+            }
+            apply(change)
+            onChange?(change)
+        }
+
+        private func apply(_ change: MarkdownSourceChange) {
             let text = NSMutableString(string: mirror)
             var last = Int.max
             for edit in change.edits {
@@ -53,9 +74,28 @@ struct MarkdownSourceChangeTests {
             mirror = text as String
         }
 
-        /// What the engine writes to the binding.
+        /// The source text of what the text view shows, worked out from scratch.
         var source: String {
-            coordinator.configuration.rawSourceMode ? textView.string : coordinator.lastComputedStorage
+            if coordinator.configuration.rawSourceMode { return textView.string }
+            return WikiLinkService.makeStorageState(
+                from: textView.string, existingMetadata: coordinator.wikiLinkMetadata,
+                textStorage: textView.textStorage
+            ).storage
+        }
+
+        /// AppKit registers undo only for a view in a window.
+        func neverShownWindow() -> NSWindow {
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+                styleMask: [.titled], backing: .buffered, defer: true)
+            window.isReleasedWhenClosed = false
+            window.contentView?.addSubview(textView)
+            return window
+        }
+
+        /// Lets the queued write reach the document.
+        func settle() async {
+            await withCheckedContinuation { done in DispatchQueue.main.async { done.resume() } }
         }
 
         func expectInStep(_ comment: Comment? = nil, sourceLocation: SourceLocation = #_sourceLocation) {
@@ -85,9 +125,10 @@ struct MarkdownSourceChangeTests {
 
     // MARK: - Typing and smart input
 
-    @Test("Loading a document reports nothing")
-    func loadReportsNothing() {
+    @Test("Loading a document reports the text it starts with, and nothing else")
+    func load() {
         let editor = Editor("# Title\n")
+        #expect(editor.mirror == "# Title\n")
         #expect(editor.changes.isEmpty)
         editor.expectInStep()
     }
@@ -198,14 +239,28 @@ struct MarkdownSourceChangeTests {
         editor.expectInStep()
     }
 
-    @Test("Replace All is one edit for each match")
-    func replaceAll() {
+    @Test("Replace All is one edit for each match", arguments: ["dog", "x", "horses", "do\ng", ""])
+    func replaceAll(replacement: String) {
         let editor = Editor("cat and cat\nno match\na cat\n")
         editor.coordinator.handleReplaceAll(Notification(
-            name: .init("x"), userInfo: ["query": "cat", "replacement": "dog"]))
-        #expect(editor.source == "dog and dog\nno match\na dog\n")
+            name: .init("x"), userInfo: ["query": "cat", "replacement": replacement]))
+        #expect(editor.source == "cat and cat\nno match\na cat\n".replacingOccurrences(of: "cat", with: replacement))
         #expect(editor.changes.count == 1)
-        #expect(editor.changes.last?.edits == [edit(23, 3, "dog"), edit(8, 3, "dog"), edit(0, 3, "dog")])
+        #expect(editor.changes.last?.edits == [
+            edit(23, 3, replacement), edit(8, 3, replacement), edit(0, 3, replacement),
+        ])
+        editor.expectInStep()
+    }
+
+    @Test("Two replacements accepted before the text view says it changed")
+    func twoProposals() {
+        let editor = Editor("alpha beta [[Page|Alias]] gamma")
+        #expect(editor.textView.shouldChangeText(in: NSRange(location: 0, length: 6), replacementString: ""))
+        editor.textView.textStorage?.replaceCharacters(in: NSRange(location: 0, length: 6), with: "")
+        #expect(editor.textView.shouldChangeText(in: NSRange(location: 4, length: 0), replacementString: " alpha"))
+        editor.textView.textStorage?.replaceCharacters(in: NSRange(location: 4, length: 0), with: " alpha")
+        editor.textView.didChangeText()
+        #expect(editor.source == "beta alpha [[Page|Alias]] gamma")
         editor.expectInStep()
     }
 
@@ -214,12 +269,8 @@ struct MarkdownSourceChangeTests {
     @Test("Undo and redo are reported")
     func undo() throws {
         let editor = Editor("hello")
-        // AppKit registers undo only for a view in a window; this one is never shown.
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
-            styleMask: [.titled], backing: .buffered, defer: true)
-        window.isReleasedWhenClosed = false
-        window.contentView?.addSubview(editor.textView)
+        let window = editor.neverShownWindow()
+        defer { window.contentView = nil }
         let undo = try #require(editor.textView.undoManager)
         editor.type("!", at: 5)
         editor.textView.breakUndoCoalescing()
@@ -296,15 +347,31 @@ struct MarkdownSourceChangeTests {
         editor.expectInStep()
     }
 
+    @Test("Marking an empty string over a selection is its deletion")
+    func emptyComposition() {
+        let editor = Editor("abcd")
+        editor.textView.setSelectedRange(NSRange(location: 1, length: 2))
+        editor.textView.setMarkedText(
+            "", selectedRange: NSRange(location: 0, length: 0),
+            replacementRange: NSRange(location: NSNotFound, length: 0))
+        #expect(editor.textView.string == "ad")
+        editor.expectInStep()
+    }
+
     // MARK: - Writing Tools
 
     @Test("A Writing Tools session is one change, when it ends", .enabled(if: {
         if #available(macOS 15.0, *) { return true } else { return false }
-    }()))
-    func writingTools() {
+    }()), arguments: [false, true])
+    func writingTools(raw: Bool) async {
         guard #available(macOS 15.0, *) else { return }
         for proofread in [true, false] {
-            let editor = Editor("teh quick fox\n\nsecond teh\n")
+            let editor = Editor("teh quick fox\n\nsecond teh\n", raw: raw)
+            editor.onChange = { [weak editor] _ in
+                // What a collaborator typed in the meantime, let in at the end.
+                editor?.onChange = nil
+                editor?.edit(NSRange(location: 0, length: 0), "REMOTE ")
+            }
             editor.textView.setSelectedRange(NSRange(location: 0, length: 13))
             editor.coordinator.textViewWritingToolsWillBegin(editor.textView)
             editor.coordinator.wtDetectedMode = proofread ? .proofread : .rewrite
@@ -312,9 +379,12 @@ struct MarkdownSourceChangeTests {
             editor.edit(NSRange(location: 4, length: 5), "speedy")
             #expect(editor.changes.isEmpty)
             editor.coordinator.textViewWritingToolsDidEnd(editor.textView)
-            #expect(editor.changes.count == 1)
-            #expect(editor.mirror == "the speedy fox\n\nsecond teh\n")
-            #expect(editor.changes.last?.edits == [edit(4, 5, "speedy"), edit(1, 2, "he")])
+            #expect(editor.changes.count == 2)
+            #expect(editor.changes.first?.edits == [edit(4, 5, "speedy"), edit(1, 2, "he")])
+            #expect(editor.mirror == "REMOTE the speedy fox\n\nsecond teh\n")
+            editor.expectInStep()
+            await editor.settle()
+            #expect(editor.document.text == editor.mirror)
         }
     }
 
@@ -331,10 +401,35 @@ struct MarkdownSourceChangeTests {
 
         editor.coordinator.documentId = "B"
         editor.coordinator.rebuildTextStorageAndStyle(editor.textView, from: "another document")
-        #expect(editor.changes.count == 1)
-        editor.mirror = "another document"
+        #expect(editor.changes.isEmpty, "a start, which the mirror followed")
+        #expect(editor.mirror == "another document")
         editor.type("!", at: 16)
         editor.expectInStep()
+    }
+
+    @Test("A new value that changed far apart leaves what is between alone")
+    func bindingValueFarApart() {
+        let lines = (0..<400).map { "line \($0) of the document\n" }
+        var new = lines
+        new[399] = "line 399 of the changed document\n"
+        new.insert("inserted\n", at: 2)
+        let editor = Editor(lines.joined())
+        editor.coordinator.rebuildTextStorageAndStyle(editor.textView, from: new.joined())
+        #expect(editor.changes.last?.edits.map(\.range.length) == [0, 0])
+        #expect(editor.changes.last?.edits.map(\.replacement) == [" changed", "inserted\n"])
+        editor.expectInStep()
+    }
+
+    @Test("Texts that share nothing are one replacement, at once")
+    func unrelatedTexts() {
+        let old = (0..<20_000).map { "o\($0)\n" }.joined()
+        let new = (0..<30_000).map { "n\($0)\n" }.joined()
+        let start = Date()
+        let edits = SourceTextDiff.edits(
+            from: old.utf16Units, NSRange(location: 0, length: old.utf16.count),
+            to: new.utf16Units, NSRange(location: 0, length: new.utf16.count))
+        #expect(edits.count == 1)
+        #expect(Date().timeIntervalSince(start) < 5)
     }
 
     @Test("Precomposed and decomposed accents are different text")
@@ -445,10 +540,181 @@ struct MarkdownSourceChangeTests {
         #expect(handle.displayRange(forSourceRange: NSRange(location: 19, length: 0)) == nil)
     }
 
+    @Test("Offsets map around a link shown under its target's current name")
+    func renamedOffsets() {
+        struct Resolver: WikiLinkResolver {
+            func resolve(displayName: String, range: NSRange) -> WikiLinkResolution? { nil }
+            func name(forID id: String) -> String? { "Longer" }
+        }
+        var configuration = MarkdownEditorConfiguration.default
+        configuration.services.wikiLinks = Resolver()
+        let editor = Editor("a [[Old|x]] b", configuration: configuration)
+        #expect(editor.textView.string == "a [[Longer]] b")
+        for (display, source) in [(4, 4), (10, 7), (11, 10), (12, 11), (14, 13)] {
+            #expect(editor.handle.sourceRange(forDisplayRange: NSRange(location: display, length: 0))
+                == NSRange(location: source, length: 0), "display \(display)")
+            #expect(editor.handle.displayRange(forSourceRange: NSRange(location: source, length: 0))
+                == NSRange(location: display, length: 0), "source \(source)")
+        }
+        #expect(editor.handle.displayRange(forSourceRange: NSRange(location: 8, length: 0))
+            == NSRange(location: 10, length: 0))
+        editor.type("q", at: 14)
+        editor.expectInStep()
+    }
+
+    // MARK: - The document
+
+    @Test("Edits in one event reach the document together, the last of them too", arguments: [false, true])
+    func severalEditsInOneEvent(raw: Bool) async {
+        let editor = Editor("abc", raw: raw)
+        editor.type("x", at: 3)
+        editor.edit(NSRange(location: 3, length: 1), "")
+        await editor.settle()
+        #expect(editor.document.text == "abc")
+        editor.type("x", at: 3)
+        editor.type("y", at: 4)
+        await editor.settle()
+        #expect(editor.document.text == "abcxy")
+        editor.expectInStep()
+    }
+
+    @Test("A handler may undo the edit it is told of")
+    func handlerEdits() async {
+        let editor = Editor("abc")
+        editor.onChange = { [weak editor] _ in
+            editor?.onChange = nil
+            editor?.edit(NSRange(location: 3, length: 1), "")
+        }
+        editor.type("x", at: 3)
+        editor.expectInStep()
+        await editor.settle()
+        #expect(editor.document.text == "abc")
+    }
+
+    // MARK: - Mounted in SwiftUI
+
+    @MainActor
+    final class Model: ObservableObject {
+        @Published var text = "abc"
+        @Published var fontSize: CGFloat = 16
+        @Published var raw = false
+        @Published var identity = 0
+        @Published var isMounted = true
+        @Published var handle = MarkdownEditorHandle()
+        var mirror = ""
+        var origins: [MarkdownSourceChange.Origin] = []
+
+        func receive(_ change: MarkdownSourceChange) {
+            origins.append(change.origin)
+            if change.origin == .start { mirror = "" }
+            let text = NSMutableString(string: mirror)
+            for edit in change.edits { text.replaceCharacters(in: edit.range, with: edit.replacement) }
+            mirror = text as String
+        }
+    }
+
+    struct Host: View {
+        @ObservedObject var model: Model
+        var body: some View {
+            if model.isMounted {
+                var configuration = MarkdownEditorConfiguration.default
+                let _ = configuration.rawSourceMode = model.raw
+                NativeTextViewWrapper(
+                    text: $model.text, configuration: configuration, fontSize: model.fontSize,
+                    onSourceChange: { model.receive($0) }, handle: model.handle
+                )
+                .id(model.identity)
+            }
+        }
+    }
+
+    @MainActor
+    final class Mounted {
+        let model = Model()
+        let window: NSWindow
+        let host: NSHostingView<Host>
+
+        init() async {
+            _ = NSApplication.shared
+            host = NSHostingView(rootView: Host(model: model))
+            // Never shown.
+            window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 600, height: 400),
+                styleMask: [.borderless], backing: .buffered, defer: true)
+            window.isReleasedWhenClosed = false
+            window.contentView = host
+            await settle()
+        }
+
+        func settle() async {
+            for _ in 0..<5 {
+                host.layoutSubtreeIfNeeded()
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+        }
+
+        func type(_ text: String) throws {
+            let view = try #require(model.handle.textView)
+            view.insertText(text, replacementRange: NSRange(location: (view.string as NSString).length, length: 0))
+        }
+
+        func expectInStep(sourceLocation: SourceLocation = #_sourceLocation) {
+            #expect(model.mirror == model.text, sourceLocation: sourceLocation)
+            #expect(model.handle.textView?.string == model.text, sourceLocation: sourceLocation)
+            #expect(model.handle.sourceText == model.text, sourceLocation: sourceLocation)
+        }
+    }
+
+    @Test("A keystroke and another change in one event leave text, document and mirror alike")
+    func mountedRaces() async throws {
+        for change in ["value", "font", "raw", "delete", "remount"] {
+            let editor = await Mounted()
+            #expect(editor.model.mirror == "abc")
+            #expect(editor.model.origins == [.start])
+            try editor.type("x")
+            switch change {
+            case "value": editor.model.text = "ABC"
+            case "font": editor.model.fontSize = 20
+            case "raw": editor.model.raw = true
+            case "remount": editor.model.identity = 1
+            default: editor.model.handle.textView?.deleteBackward(nil)
+            }
+            editor.host.layoutSubtreeIfNeeded()
+            await editor.settle()
+            // Forces another pass over the same text.
+            editor.model.fontSize += 1
+            await editor.settle()
+            editor.expectInStep()
+            if ["font", "raw", "remount"].contains(change) { #expect(editor.model.text == "abcx", "\(change)") }
+            try editor.type("z")
+            await editor.settle()
+            editor.expectInStep()
+        }
+    }
+
+    @Test("The handle refers to the mounted editor only, and unmounting frees it")
+    func handleAndUnmount() async throws {
+        let editor = await Mounted()
+        let first = editor.model.handle
+        weak var textView = first.textView
+        weak var coordinator = first.coordinator
+        #expect(textView != nil)
+        editor.model.handle = MarkdownEditorHandle()
+        await editor.settle()
+        #expect(first.textView == nil)
+        #expect(editor.model.handle.textView != nil)
+        editor.model.isMounted = false
+        await editor.settle()
+        #expect(editor.model.handle.textView == nil)
+        #expect(editor.model.handle.sourceText == nil)
+        for _ in 0..<50 where coordinator != nil { await editor.settle() }
+        #expect(coordinator == nil)
+    }
+
     // MARK: - Fuzz
 
     @Test("2,000 random edits, over every kind of text", arguments: [false, true])
-    func fuzz(raw: Bool) {
+    func fuzz(raw: Bool) async throws {
         struct Random {
             var state: UInt64
             mutating func next(_ bound: Int) -> Int {
@@ -462,6 +728,10 @@ struct MarkdownSourceChangeTests {
             "![[pic]]", "|", "é", "e\u{301}", "漢字", "👩‍👩‍👧", "🇨🇦", "👍🏽", "\t", "->", "| a | b |\n| - | - |\n", " ",
         ]
         let editor = Editor("a [[Page|Alias]] b ![[pic|id-1|200]] c\n\n- [[Other|x]]\n- two [[Third]]\n", raw: raw)
+        let window = editor.neverShownWindow()
+        defer { window.contentView = nil }
+        let undo = try #require(editor.textView.undoManager)
+        let whole = NSRange(location: NSNotFound, length: 0)
         for step in 0..<2000 {
             let text = editor.textView.string as NSString
             // Whole characters, as a person or AppKit would select.
@@ -473,16 +743,48 @@ struct MarkdownSourceChangeTests {
                     for: NSRange(location: at, length: min(span, text.length - at)))
             let target = NSRange(location: range.location, length: span == 0 ? 0 : range.length)
             let replacement = random.next(4) == 0 ? "" : pieces[random.next(pieces.count)]
-            switch random.next(6) {
-            case 0: editor.edit(target, replacement)
-            case 1 where target.length > 0:
+            switch random.next(14) {
+            case 0...1: editor.edit(target, replacement)
+            case 2 where target.length > 0 && !raw:
                 editor.textView.setSelectedRange(target)
                 editor.coordinator.didMarkdownBold(nil)
+            case 3: if undo.canUndo { undo.undo() }
+            case 4: if undo.canRedo { undo.redo() }
+            case 5:
+                editor.textView.setSelectedRange(target)
+                for marked in ["か", "かn", "かん"] {
+                    editor.textView.setMarkedText(
+                        marked, selectedRange: NSRange(location: 1, length: 0), replacementRange: whole)
+                }
+                switch random.next(3) {
+                case 0: editor.textView.insertText("漢", replacementRange: whole)
+                case 1: editor.textView.unmarkText()
+                default:
+                    editor.textView.setMarkedText(
+                        "", selectedRange: NSRange(location: 0, length: 0), replacementRange: whole)
+                }
+            case 6 where step % 5 == 0:
+                editor.coordinator.handleReplaceAll(Notification(
+                    name: .init("x"), userInfo: ["query": "a", "replacement": ["b", "", "a\na"][random.next(3)]]))
+            case 7 where step % 5 == 0:
+                // A value from outside, after which the undo history means nothing.
+                undo.removeAllActions()
+                editor.document.text = "new\n" + editor.source.replacingOccurrences(of: "word", with: "WORD")
+                editor.coordinator.rebuildTextStorageAndStyle(editor.textView, from: editor.document.text)
             default: editor.type(replacement, at: target.location, replacing: target.length)
             }
             guard editor.mirror.hasSameUTF16(as: editor.source) else {
                 Issue.record("step \(step): \(editor.changes.last as Any)")
                 return
+            }
+            if step % 20 == 0 {
+                // Ends the undo group too, as the end of an event does.
+                await editor.settle()
+                #expect(editor.document.text.hasSameUTF16(as: editor.mirror), "step \(step)")
+            }
+            // Deletions win in the long run; keep the text a fair size.
+            if editor.textView.string.utf16.count > 6000 {
+                editor.edit(NSRange(location: 0, length: editor.textView.string.utf16.count), "a [[Page]] b\n")
             }
         }
         editor.expectInStep()
