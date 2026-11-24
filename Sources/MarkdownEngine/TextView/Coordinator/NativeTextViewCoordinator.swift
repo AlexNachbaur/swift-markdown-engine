@@ -74,7 +74,11 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     var lastHTMLBlockFingerprint: AnyHashable?
     private var busObservers: [NSObjectProtocol] = []
     private var registeredAppearanceObserverName: Notification.Name?
-    weak var textView: NSTextView?
+    weak var textView: NSTextView? {
+        didSet { if textView !== oldValue { observeTextStorage() } }
+    }
+    let sourceEdits = SourceEditTracker()
+    private var textStorageObserver: NSObjectProtocol?
     /// Owns the scroll-away header (build, content refresh, collapse/expand,
     /// teardown). Created on first reconcile with a non-nil header.
     var headerController: ScrollingHeaderController?
@@ -83,6 +87,7 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     var onLinkClick: ((String) -> Void)?
     var onCaretRectChange: ((CGRect) -> Void)?
     var onTextMutation: ((MarkdownTextMutation) -> Void)?
+    var onSourceChange: ((MarkdownSourceChange) -> Void)?
     /// Embedder hook to build the right-click menu (the engine ships none). Gets the
     /// default menu + current selection range, returns the menu to show.
     var onBuildContextMenu: ((NSMenu, NSRange) -> NSMenu)?
@@ -479,6 +484,37 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
         return nil
     }
 
+    /// Every character change passes here, whichever path made it.
+    private func observeTextStorage() {
+        if let textStorageObserver { NotificationCenter.default.removeObserver(textStorageObserver) }
+        textStorageObserver = nil
+        guard let storage = textView?.textStorage else { return }
+        textStorageObserver = NotificationCenter.default.addObserver(
+            forName: NSTextStorage.didProcessEditingNotification, object: storage, queue: nil
+        ) { [weak self] notification in
+            guard let storage = notification.object as? NSTextStorage,
+                  storage.editedMask.contains(.editedCharacters) else { return }
+            self?.sourceEdits.noteStorageEdit(
+                editedRange: storage.editedRange, changeInLength: storage.changeInLength)
+        }
+    }
+
+    /// Reports what led from the last reported source text to `source`, if anything.
+    func reportSourceChange(to source: String, origin: MarkdownSourceChange.Origin) {
+        let metadata = configuration.rawSourceMode ? [:] : wikiLinkMetadata
+        guard let onSourceChange else {
+            sourceEdits.reset(source: source, metadata: metadata, documentId: documentId)
+            return
+        }
+        let edits = sourceEdits.takeEdits(to: source, metadata: metadata, documentId: documentId)
+        if !edits.isEmpty { onSourceChange(MarkdownSourceChange(edits: edits, origin: origin)) }
+    }
+
+    /// The map between display and source offsets, unless an edit is still unfinished.
+    var settledWikiLinkMap: WikiLinkOffsetMap? {
+        sourceEdits.source == nil || sourceEdits.hasUnreportedEdits ? nil : sourceEdits.linkMap
+    }
+
     // Methods are split across the following extensions:
     //   - +TextDelegate    — NSTextViewDelegate hot path
     //   - +Restyling       — restyle pipeline + parsedDocument cache
@@ -492,6 +528,7 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     deinit {
         NotificationCenter.default.removeObserver(self)
         busObservers.forEach(NotificationCenter.default.removeObserver(_:))
+        if let textStorageObserver { NotificationCenter.default.removeObserver(textStorageObserver) }
     }
 }
 

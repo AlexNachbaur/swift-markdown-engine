@@ -48,7 +48,7 @@ extension NativeTextViewCoordinator {
         // the ensureLayout below rebuilds from scratch anyway. This rebuild's own
         // ensureLayout IS that one-shot per-document layout.
         didEnsureLayoutForCurrentDocument = true
-        if textView.string != displayText {
+        if !textView.string.hasSameUTF16(as: displayText) {
             textView.string = displayText
             parseGeneration &+= 1
         }
@@ -206,6 +206,7 @@ extension NativeTextViewCoordinator {
             nativeTextView.updateWideTableOverlays()
             nativeTextView.updateHTMLBlockViews()
         }
+        reportSourceChange(to: text, origin: .binding)
     }
 
     @discardableResult

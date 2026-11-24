@@ -185,7 +185,11 @@ final class NativeTextView: NSTextView {
 
     // setMarkedText skips textDidChange, so restyle the marked paragraph to apply markdown attrs.
     override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        let wasMarked = hasMarkedText()
         super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
+        // A composition cancelled by emptying it ends here. The text can still have
+        // changed: composing over a selection deleted it.
+        if wasMarked, !hasMarkedText() { didChangeText() }
         guard hasMarkedText(),
               let coord = delegate as? NativeTextViewCoordinator else { return }
         let marked = markedRange()

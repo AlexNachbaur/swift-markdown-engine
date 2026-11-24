@@ -198,7 +198,8 @@ waits for a view.
 
 `WikiLinkService.swift` handles the dual-form storage / display transform —
 storage is `[[Name|<id>]]`, display is `[[Name]]`. The coordinator runs it both
-ways every time `rebuildTextStorageAndStyle()` fires.
+ways every time `rebuildTextStorageAndStyle()` fires. `WikiLinkOffsetMap.swift`
+maps positions between the two.
 
 **Invariant:** Service callbacks are synchronous. If an embedder's
 implementation is slow, it caches (both bundled bridges do); the engine never
@@ -280,7 +281,9 @@ Two sub-folders matter:
   column width with off-screen views, and keeps the first visible line in
   place when a block above it changes height)
 - `Coordinator/` — `NSTextViewDelegate` glue, split by concern (restyling,
-  writing-tools, find, code-blocks, inline selection, autocorrect)
+  writing-tools, find, code-blocks, inline selection, autocorrect).
+  `SourceEditTracker` notes where the text storage changed and turns each
+  finished change into edits of the source text, for `onSourceChange`
 
 Application of `[StyledRange]` to text storage happens in
 `Coordinator/NativeTextViewCoordinator+Restyling.swift` →

@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ships `WebKitHTMLBlockRenderer`. Without a renderer HTML stays literal text.
   Only blocks near the screen get a view; the rest are measured off screen,
   and the WebKit renderer reuses views from one app-wide pool.
+- `NativeTextViewWrapper.onSourceChange` reports every change to the source text
+  as edits in its own offsets, so an embedder can keep a mirror. Smart input,
+  compositions, Writing Tools, undo and a new `text` value are all included.
+- `MarkdownEditorHandle` gives an embedder the mounted editor's text view, its
+  source text, and ranges mapped between the display and the source.
 - `NativeTextViewWrapper.isFocused` provides optional two-way first-responder
   coordination for embedders without changing AppKit-owned focus by default.
 - `CodeBlockButton(onHover:)` reports the pointer over the copy button, so an
@@ -72,6 +77,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Smart paste keeps tables, lists and headings that arrive wrapped in elements the converter doesn't know (Gemini's `<response-element>`/`<table-block>` web components, `<section>`, a Google Docs `<b>` wrapper); they used to collapse into one line of text.
 - Writing Tools on macOS 27: switching documents while a proofread's suggestions show, or pressing ⌘Z during a rewrite, no longer crashes when the session ends. AppKit's own end replayed the session's ranges over the next document or the undone text; the engine now ends the session at the switch and at the undo. Until then the next document also took no updates.
 - After a proofread the next keystroke reports its `onTextMutation` again.
+- A change between precomposed and decomposed accents reaches the `text` binding, and one in the binding reaches the text view. Swift's `==` calls them equal.
+- A composition over a selection, cancelled, writes the deleted selection to the `text` binding at once instead of with the next edit.
 
 ## [0.14.0] - 2026-10-04
 

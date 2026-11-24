@@ -46,7 +46,7 @@ extension NativeTextViewCoordinator {
     /// content. Returns `true` if a stack was cleared.
     @discardableResult
     func invalidateUndoIfContentDiverged(for documentId: String, incomingText: String) -> Bool {
-        guard let snapshot = undoContentSnapshots[documentId], snapshot != incomingText else {
+        guard let snapshot = undoContentSnapshots[documentId], !snapshot.hasSameUTF16(as: incomingText) else {
             return false
         }
         undoManagers[documentId]?.removeAllActions()
@@ -90,7 +90,7 @@ extension NativeTextViewCoordinator {
             pendingEditCount = 0
             pendingEditedRange = nil
             guard !tv.hasMarkedText() else { return }
-            if tv.string != lastSyncedText {
+            if !tv.string.hasSameUTF16(as: lastSyncedText) {
                 let rawText = tv.string
                 let target = documentId
                 DispatchQueue.main.async {
@@ -104,8 +104,9 @@ extension NativeTextViewCoordinator {
                 bottomTextView.recalcOverscroll(for: scrollView, debugTag: "textDidChange")
                 (scrollView as? ClampedScrollView)?.clampToInsets()
             }
-            if let completedTextMutation, bindingFollows(documentId) {
-                onTextMutation?(completedTextMutation)
+            if bindingFollows(documentId) {
+                if let completedTextMutation { onTextMutation?(completedTextMutation) }
+                reportSourceChange(to: tv.string, origin: .editor)
             }
             return
         }
@@ -197,7 +198,7 @@ extension NativeTextViewCoordinator {
                        "wiki incremental splice diverged from full rebuild")
             }
 #endif
-            if storageState.storage != self.lastSyncedText {
+            if !storageState.storage.hasSameUTF16(as: self.lastSyncedText) {
                 let target = documentId
                 DispatchQueue.main.async {
                     guard self.bindingFollows(target) else { return }
@@ -377,8 +378,9 @@ extension NativeTextViewCoordinator {
             }
         }
         previousActiveTokenIndices = activeTokenIndices
-        if let completedTextMutation, bindingFollows(documentId) {
-            onTextMutation?(completedTextMutation)
+        if bindingFollows(documentId) {
+            if let completedTextMutation { onTextMutation?(completedTextMutation) }
+            PerfTrace.measure("sourceEdits") { reportSourceChange(to: lastComputedStorage, origin: .editor) }
         }
         PerfTrace.end()
     }

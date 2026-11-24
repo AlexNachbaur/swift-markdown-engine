@@ -95,6 +95,13 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
     /// Multi-step smart-input transformations and ambiguous composition
     /// batches are omitted so embedders can treat every callback as exact.
     public var onTextMutation: ((MarkdownTextMutation) -> Void)?
+    /// Reports every change to the source text, once it is finished. Nothing is
+    /// left out, so an embedder can keep a mirror of the text; see
+    /// ``MarkdownSourceChange``. Not called for the text an editor is mounted with
+    /// or a switch to another `documentId`.
+    public var onSourceChange: ((MarkdownSourceChange) -> Void)?
+    /// Refers to the editor while it is mounted; see ``MarkdownEditorHandle``.
+    public var handle: MarkdownEditorHandle?
     /// Build the editor's right-click menu (the engine ships no menu). Receives the default
     /// NSMenu + the current selection range; return the menu to display (or unchanged).
     public var onBuildContextMenu: ((NSMenu, NSRange) -> NSMenu)?
@@ -171,6 +178,8 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         onLinkClick: ((String) -> Void)? = nil,
         onCaretRectChange: ((CGRect) -> Void)? = nil,
         onTextMutation: ((MarkdownTextMutation) -> Void)? = nil,
+        onSourceChange: ((MarkdownSourceChange) -> Void)? = nil,
+        handle: MarkdownEditorHandle? = nil,
         onBuildContextMenu: ((NSMenu, NSRange) -> NSMenu)? = nil,
         onInlineSelectionChange: ((InlineSelectionState?) -> Void)? = nil,
         onInlinePreviewKey: ((InlinePreviewKey) -> Bool)? = nil,
@@ -200,6 +209,8 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         self.onLinkClick = onLinkClick
         self.onCaretRectChange = onCaretRectChange
         self.onTextMutation = onTextMutation
+        self.onSourceChange = onSourceChange
+        self.handle = handle
         self.onBuildContextMenu = onBuildContextMenu
         self.onInlineSelectionChange = onInlineSelectionChange
         self.onInlinePreviewKey = onInlinePreviewKey
@@ -352,6 +363,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         context.coordinator.wikiLinkMetadata = initialState.metadata
         context.coordinator.onCaretRectChange = onCaretRectChange
         context.coordinator.onTextMutation = onTextMutation
+        handle?.coordinator = context.coordinator
         context.coordinator.onBuildContextMenu = onBuildContextMenu
         context.coordinator.onInlineSelectionChange = onInlineSelectionChange
         context.coordinator.onInlinePreviewKey = onInlinePreviewKey
@@ -434,6 +446,8 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         // to reach the CURRENT closures even when the pass below returns early.
         context.coordinator.onPersistScrollOffset = onPersistScrollOffset
         context.coordinator.restoreScrollOffset = restoreScrollOffset
+        context.coordinator.onSourceChange = onSourceChange
+        handle?.coordinator = context.coordinator
         context.coordinator.isFocused = isFocused
         textView.requestedFocus = isFocused?.wrappedValue
         textView.reconcileRequestedFocus()
@@ -665,7 +679,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             return
         }
         if context.coordinator.didInitialFormatting
-            && context.coordinator.lastSyncedText == text
+            && context.coordinator.lastSyncedText.hasSameUTF16(as: text)
             && !fontChanged {
             return
         }
@@ -809,6 +823,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         coordinator.documentId = documentId
         coordinator.onPersistScrollOffset = onPersistScrollOffset
         coordinator.onTextMutation = onTextMutation
+        coordinator.onSourceChange = onSourceChange
         coordinator.restoreScrollOffset = restoreScrollOffset
         // Seeding documentId above means the first update pass is not a switch, so
         // arm the restore here or a remount would always open at the top.
