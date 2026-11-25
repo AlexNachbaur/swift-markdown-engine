@@ -547,10 +547,11 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
                 if target != self.documentId { self.queueBindingWrite() }
                 return
             }
-            guard !self.lastComputedStorage.hasSameUTF16(as: self.lastSyncedText) else { return }
-            // Left stale, it makes the next update pass rebuild.
-            if !self.needsRebuildAfterWrite { self.lastSyncedText = self.lastComputedStorage }
+            let needsRebuild = self.needsRebuildAfterWrite
             self.needsRebuildAfterWrite = false
+            guard !self.lastComputedStorage.hasSameUTF16(as: self.lastSyncedText) else { return }
+            if needsRebuild { self.didInitialFormatting = false }
+            self.lastSyncedText = self.lastComputedStorage
             self.text = self.lastComputedStorage
         }
     }
@@ -593,7 +594,9 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
 
     /// The map between display and source offsets, unless an edit is still unfinished.
     var settledWikiLinkMap: WikiLinkOffsetMap? {
-        sourceEdits.source == nil || sourceEdits.hasUnreportedEdits ? nil : sourceEdits.linkMap
+        guard sourceEdits.source != nil, !sourceEdits.hasUnreportedEdits, !isWritingToolsActive,
+              textView?.hasMarkedText() != true else { return nil }
+        return sourceEdits.linkMap
     }
 
     // Methods are split across the following extensions:

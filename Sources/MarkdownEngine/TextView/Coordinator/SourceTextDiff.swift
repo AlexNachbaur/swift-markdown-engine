@@ -221,7 +221,10 @@ struct SourceTextDiff {
         var out: [Gap] = []
         // First on top. A list rather than recursion: nesting can be as deep as the text is long.
         var pending = [Gap(old: old.startIndex..<old.endIndex, new: new.startIndex..<new.endIndex)]
+        // Splitting can, for texts made to do so, find one piece at a time.
+        var budget = 32 * (old.count + new.count)
         while var gap = pending.popLast() {
+            budget -= gap.old.count + gap.new.count
             while let oldIndex = gap.old.first, let newIndex = gap.new.first,
                   old[oldIndex].number == new[newIndex].number {
                 gap.old.removeFirst()
@@ -233,7 +236,7 @@ struct SourceTextDiff {
                 gap.new.removeLast()
             }
             guard !gap.old.isEmpty || !gap.new.isEmpty else { continue }
-            let anchors = commonUnique(old, new, gap)
+            let anchors = budget > 0 ? commonUnique(old, new, gap) : []
             guard !anchors.isEmpty else {
                 out.append(gap)
                 continue

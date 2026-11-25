@@ -834,6 +834,60 @@ struct MarkdownSourceChangeTests {
         }
     }
 
+    @Test("A partly undone Writing Tools session keeps what is left of it")
+    func partlyUndoneWritingTools() async throws {
+        guard #available(macOS 15.0, *) else { return }
+        let editor = await Mounted()
+        let view = try #require(editor.model.handle.textView as? NativeTextView)
+        let coordinator = try #require(editor.model.handle.coordinator)
+        coordinator.textViewWritingToolsWillBegin(view)
+        coordinator.wtDetectedMode = .rewrite
+        for (range, text) in [(NSRange(location: 0, length: 1), "X"), (NSRange(location: 2, length: 1), "Z")] {
+            #expect(view.shouldChangeText(in: range, replacementString: text))
+            view.textStorage?.replaceCharacters(in: range, with: text)
+            view.didChangeText()
+        }
+        // What the undo of the second edit leaves, as macOS 15.1–26 hand it over.
+        coordinator.wtPostUndoSnapshot = "Xbc"
+        coordinator.textViewWritingToolsDidEnd(view)
+        await editor.settle()
+        editor.model.unrelated += 1
+        await editor.settle()
+        #expect(editor.model.text == "Xbc")
+        editor.expectInStep()
+    }
+
+    @Test("A keystroke between a Writing Tools result and the pass that styles it is kept")
+    func typingAfterWritingTools() async throws {
+        guard #available(macOS 15.0, *) else { return }
+        let editor = await Mounted()
+        let view = try #require(editor.model.handle.textView as? NativeTextView)
+        let coordinator = try #require(editor.model.handle.coordinator)
+        coordinator.textViewWritingToolsWillBegin(view)
+        coordinator.wtDetectedMode = .proofread
+        #expect(view.shouldChangeText(in: NSRange(location: 0, length: 3), replacementString: "xyz"))
+        view.textStorage?.replaceCharacters(in: NSRange(location: 0, length: 3), with: "xyz")
+        view.didChangeText()
+        coordinator.textViewWritingToolsDidEnd(view)
+        await withCheckedContinuation { done in DispatchQueue.main.async { done.resume() } }
+        try editor.type("Q")
+        await editor.settle()
+        #expect(editor.model.text == "xyzQ")
+        editor.expectInStep()
+    }
+
+    @Test("A first handler that comes with a switch of document isn't told of the last one")
+    func firstHandlerWithSwitch() async throws {
+        let editor = await Mounted(reports: false)
+        editor.model.documentId = "B"
+        editor.model.text = "doc B"
+        editor.model.reports = true
+        await editor.settle()
+        #expect(editor.model.origins == [.start])
+        #expect(editor.model.mirror == "doc B")
+        editor.expectInStep()
+    }
+
     @Test("The handle refers to the mounted editor only, and unmounting frees it")
     func handleAndUnmount() async throws {
         let editor = await Mounted()

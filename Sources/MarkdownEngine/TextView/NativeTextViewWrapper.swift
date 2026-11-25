@@ -461,7 +461,8 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         context.coordinator.restoreScrollOffset = restoreScrollOffset
         let startsReporting = context.coordinator.onSourceChange == nil && onSourceChange != nil
         context.coordinator.onSourceChange = onSourceChange
-        if startsReporting { context.coordinator.reportSourceStart() }
+        // With a switch, the rebuild for the new document reports its start.
+        if startsReporting, !isNodeSwitch { context.coordinator.reportSourceStart() }
         // Only a new one: an editor about to be replaced must not take back the handle.
         if context.coordinator.handle !== handle { context.coordinator.attach(handle) }
         context.coordinator.isFocused = isFocused

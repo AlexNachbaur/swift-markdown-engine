@@ -47,7 +47,10 @@ extension NativeTextViewCoordinator {
 
         // Binding is already equal to `storage` after undo so SwiftUI won't re-render — rebuild the textView directly.
         if postUndo != nil {
+            // The binding may not have what is left of the session yet.
+            let synced = lastSyncedText
             rebuildTextStorageAndStyle(textView, from: storage, origin: .editor)
+            lastSyncedText = synced
         }
         // Otherwise updateNSView rebuilds (restyle + re-measure) once the binding has
         // the result, so the accepted WT result stays visible.
