@@ -155,12 +155,7 @@ public enum WikiLinkService {
             let contentRange = NSRange(location: matchRange.location + openMarker, length: contentLength)
             let name = nsDisplay.substring(with: contentRange)
 
-            var linkID: String? = nil
-            if contentRange.length > 0 {
-                if let idAttr = textStorage?.attribute(.wikiLinkID, at: contentRange.location, effectiveRange: nil) as? String {
-                    linkID = idAttr
-                }
-            }
+            var linkID = textStorage.flatMap { carriedID(ofLinkAt: matchRange, in: $0) }
             if linkID == nil {
                 linkID = existingMetadata[RangeKey(matchRange)]?.id
             }
@@ -187,6 +182,30 @@ public enum WikiLinkService {
         }
 
         return (storage, metadata)
+    }
+
+    /// The `.wikiLinkID` on the name of the display-form link at `linkRange`, the first
+    /// one if text typed over the name's start has none. Text written over or next to
+    /// a name takes its attributes, so an id that reaches the brackets around the name
+    /// belongs to another link.
+    static func carriedID(ofLinkAt linkRange: NSRange, in storage: NSTextStorage) -> String? {
+        guard linkRange.location != NSNotFound, linkRange.length > 0, NSMaxRange(linkRange) <= storage.length else { return nil }
+        let isImage = storage.mutableString.character(at: linkRange.location) == 0x21 // '!'
+        let name = NSRange(location: linkRange.location + (isImage ? 3 : 2), length: linkRange.length - (isImage ? 5 : 4))
+        guard name.length > 0 else { return nil }
+        var found: String?
+        storage.enumerateAttribute(.wikiLinkID, in: name) { value, _, stop in
+            if let value = value as? String {
+                found = value
+                stop.pointee = true
+            }
+        }
+        guard let id = found else { return nil }
+        for bracket in [name.location - 1, NSMaxRange(name)]
+        where storage.attribute(.wikiLinkID, at: bracket, effectiveRange: nil) as? String == id {
+            return nil
+        }
+        return id
     }
 
     /// Incremental counterpart to `makeStorageState`: splice a single contiguous

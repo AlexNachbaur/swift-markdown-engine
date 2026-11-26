@@ -208,6 +208,8 @@ extension NativeTextViewCoordinator {
             nativeTextView.updateWideTableOverlays()
             nativeTextView.updateHTMLBlockViews()
         }
+        // The metadata above is this text's, whichever way it got here.
+        markWikiLinkMetadataCurrent()
         // The rebuild is done, and a handler may edit.
         isRebuildingDocument = false
         reportSourceChange(origin: origin)
@@ -244,9 +246,7 @@ extension NativeTextViewCoordinator {
             // selected range here too (read-only suppresses it like the caret).
             selection: textView.isEditable ? textView.selectedRange() : nil,
             activeTokenIndices: activeTokenIndices,
-            wikiLinkIDProvider: { [weak self] range in
-                self?.wikiLinkID(for: range)
-            },
+            wikiLinkIDProvider: wikiLinkIDProvider(for: textView.textStorage),
             precomputedTokens: tokens,
             classified: classified,
             precomputedBlocks: blocks,

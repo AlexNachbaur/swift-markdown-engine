@@ -81,6 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An unmounted editor is freed: the viewport observers kept its scroll view, text view and coordinator alive.
 - Replace All with a shorter replacement no longer throws, and several replacements accepted before one `didChangeText` no longer corrupt the storage form.
 - Undo and redo reach the `text` binding and the styling at once, without depending on AppKit to say so: in a bare `NSTextView` with TextKit 2 its undo calls neither `shouldChangeText` nor `didChangeText`.
+- A wiki link or image embed keeps its id through a composition, Writing Tools or an undo that moves it, and no longer takes the id of a link that was where it now is.
 - A change between precomposed and decomposed accents reaches the `text` binding, and one in the binding reaches the text view. Swift's `==` calls them equal.
 - A composition over a selection, cancelled, writes the deleted selection to the `text` binding at once instead of with the next edit.
 

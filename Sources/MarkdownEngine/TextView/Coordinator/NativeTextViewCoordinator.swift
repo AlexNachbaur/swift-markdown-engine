@@ -136,7 +136,12 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     var lastAppliedInlineReplacementID: UUID?
     var activeTokenIndices: Set<Int> = []
     var previousActiveTokenIndices: Set<Int> = []
-    var wikiLinkMetadata: [WikiLinkService.RangeKey: WikiLinkService.LinkMetadata] = [:]
+    var wikiLinkMetadata: [WikiLinkService.RangeKey: WikiLinkService.LinkMetadata] = [:] {
+        didSet { markWikiLinkMetadataCurrent() }
+    }
+    /// The display text `wikiLinkMetadata`'s positions are in. During a composition or a
+    /// Writing Tools session the text moves on without it.
+    private var wikiLinkMetadataText = ""
     var previousBacktickCount: Int = 0
     /// Backtick census baseline captured in shouldChangeTextIn: the pre-edit
     /// window count around the proposed edit, so textDidChange can update the
@@ -479,6 +484,41 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
         wikiLinkMetadata[WikiLinkService.RangeKey(range)]?.id
     }
 
+    /// Takes the text view's text as the one `wikiLinkMetadata` is in.
+    func markWikiLinkMetadataCurrent() {
+        wikiLinkMetadataText = textView?.string ?? ""
+    }
+
+    /// `wikiLinkMetadata` with its links where they are in `displayText`, for their ids.
+    /// A link in what changed is left out: only its own name can say which it is. The
+    /// texts are compared rather than the edited range trusted, which reaches the end
+    /// of the paragraph for some input methods.
+    func wikiLinkMetadata(in displayText: String) -> [WikiLinkService.RangeKey: WikiLinkService.LinkMetadata] {
+        // Not `hasSameUTF16`: on the text storage's string that took 2 ms a keystroke.
+        let changed = DisplayEditRegion.between(wikiLinkMetadataText, displayText)
+        guard changed.oldLength > 0 || changed.newLength > 0 else { return wikiLinkMetadata }
+        var moved: [WikiLinkService.RangeKey: WikiLinkService.LinkMetadata] = [:]
+        moved.reserveCapacity(wikiLinkMetadata.count)
+        for (key, metadata) in wikiLinkMetadata {
+            if let range = changed.moved(NSRange(location: key.location, length: key.length)) {
+                moved[WikiLinkService.RangeKey(range)] = metadata
+            }
+        }
+        return moved
+    }
+
+    /// Each link's id for a restyle of `storage`: the one recorded where the link is
+    /// now, or else the one its name carries. By the recorded positions alone, a
+    /// restyle during a composition erased the id from the text.
+    func wikiLinkIDProvider(for storage: NSTextStorage?) -> (NSRange) -> String? {
+        let metadata = storage.map { wikiLinkMetadata(in: $0.string) } ?? [:]
+        return { range in
+            if let known = metadata[WikiLinkService.RangeKey(range)] { return known.id }
+            guard let storage else { return nil }
+            return WikiLinkService.carriedID(ofLinkAt: range, in: storage)
+        }
+    }
+
     func storageRange(forDisplayRange range: NSRange) -> NSRange? {
         wikiLinkMetadata[WikiLinkService.RangeKey(range)]?.storageRange
     }
@@ -509,6 +549,9 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
         ) { [weak self] notification in
             guard let storage = notification.object as? NSTextStorage,
                   storage.editedMask.contains(.editedCharacters) else { return }
+            // TextKit 2's undo replays its edits without `shouldChangeText`, so a parse
+            // cached partway through one, at the final length, read as current.
+            self?.parseGeneration &+= 1
             self?.sourceEdits.noteStorageEdit(
                 editedRange: storage.editedRange, changeInLength: storage.changeInLength)
         }

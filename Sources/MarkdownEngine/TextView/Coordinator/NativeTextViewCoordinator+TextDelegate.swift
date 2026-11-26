@@ -173,7 +173,7 @@ extension NativeTextViewCoordinator {
                     previousMetadata: wikiLinkMetadata
                 ) ?? WikiLinkService.makeStorageState(
                     from: docString,
-                    existingMetadata: wikiLinkMetadata,
+                    existingMetadata: wikiLinkMetadata(in: docString),
                     textStorage: tv.textStorage
                 )
             }

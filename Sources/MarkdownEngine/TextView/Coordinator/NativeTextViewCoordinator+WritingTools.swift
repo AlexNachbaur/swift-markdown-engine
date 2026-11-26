@@ -37,8 +37,9 @@ extension NativeTextViewCoordinator {
         let sourceText = postUndo ?? textView.string
         let storageState = WikiLinkService.makeStorageState(
             from: sourceText,
-            existingMetadata: wikiLinkMetadata,
-            textStorage: textView.textStorage
+            existingMetadata: wikiLinkMetadata(in: sourceText),
+            // The text view's attributes are another text's when the snapshot isn't its.
+            textStorage: sourceText.hasSameUTF16(as: textView.string) ? textView.textStorage : nil
         )
         wikiLinkMetadata = storageState.metadata
         let storage = storageState.storage
