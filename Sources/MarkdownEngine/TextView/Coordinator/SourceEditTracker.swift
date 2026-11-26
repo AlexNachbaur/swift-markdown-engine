@@ -21,16 +21,15 @@ final class SourceEditTracker {
     private var metadata: LinkMetadata = [:]
     private var cachedLinkMap: WikiLinkOffsetMap?
 
-    /// The display region changed since the last report: where it was before, and
-    /// where it is now. Both start at the same offset.
-    private var changed: (start: Int, oldLength: Int, newLength: Int)?
+    /// The display region changed since the last report.
+    private var changed: DisplayEditRegion?
 
     var hasUnreportedEdits: Bool { changed != nil }
 
     /// Where the display text changed since the last report, as it is now, and by
     /// how much its length changed.
     var unreportedDisplayEdit: (range: NSRange, delta: Int)? {
-        changed.map { (NSRange(location: $0.start, length: $0.newLength), $0.newLength - $0.oldLength) }
+        changed.map { (NSRange(location: $0.start, length: $0.newLength), $0.delta) }
     }
 
     /// The map of the last reported text. Built when something asks for it.
@@ -43,17 +42,7 @@ final class SourceEditTracker {
 
     /// Notes one round of `NSTextStorage` editing.
     func noteStorageEdit(editedRange: NSRange, changeInLength delta: Int) {
-        let location = editedRange.location
-        let priorLength = editedRange.length - delta
-        guard location != NSNotFound, priorLength >= 0 else { return }
-        guard let current = changed else {
-            changed = (location, priorLength, editedRange.length)
-            return
-        }
-        let start = min(current.start, location)
-        let priorEnd = max(current.start + current.newLength, location + priorLength)
-        let priorUnion = priorEnd - start
-        changed = (start, current.oldLength + priorUnion - current.newLength, priorUnion + delta)
+        changed = .adding(editedRange: editedRange, changeInLength: delta, to: changed)
     }
 
     /// Takes a text as the last reported one, without saying how it came about.
