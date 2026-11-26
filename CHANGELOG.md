@@ -80,7 +80,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An edit and another change in one event (a new `text` value, a font change, the raw source toggle, an edit that reverts the first) no longer leave the binding with a text the editor doesn't show.
 - An unmounted editor is freed: the viewport observers kept its scroll view, text view and coordinator alive.
 - Replace All with a shorter replacement no longer throws, and several replacements accepted before one `didChangeText` no longer corrupt the storage form.
-- Undo and redo reach the `text` binding and the styling at once. With TextKit 2, AppKit's undo doesn't say that the text changed, so they waited for the next edit.
+- Undo and redo reach the `text` binding and the styling at once, without depending on AppKit to say so: in a bare `NSTextView` with TextKit 2 its undo calls neither `shouldChangeText` nor `didChangeText`.
 - A change between precomposed and decomposed accents reaches the `text` binding, and one in the binding reaches the text view. Swift's `==` calls them equal.
 - A composition over a selection, cancelled, writes the deleted selection to the `text` binding at once instead of with the next edit.
 
